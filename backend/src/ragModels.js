@@ -1,8 +1,19 @@
 // EduSentry provider catalogue. Cloud models are only exposed when their API key
 // is configured; Ollama is local and needs no cloud API key. Free-tier limits vary.
 export const RAG_MODEL_CONFIG = {
-  'gemini-flash': { provider: 'gemini', envKey: 'GEMINI_API_KEY', defaultModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash' },
-  'gemini-flash-lite': { provider: 'gemini', envKey: 'GEMINI_API_KEY', defaultModel: process.env.GEMINI_LITE_MODEL || 'gemini-2.5-flash-lite' },
+  
+'gemini-flash': {
+  provider: 'gemini',
+  envKey: 'GEMINI_API_KEY',
+  defaultModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+},
+
+'gemini-flash-lite': {
+  provider: 'gemini',
+  envKey: 'GEMINI_API_KEY',
+  defaultModel: process.env.GEMINI_LITE_MODEL || 'gemini-3.5-flash-lite'
+},
+
   'groq-llama-3.3-70b': { provider: 'groq', envKey: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },
   'groq-gpt-oss-20b': { provider: 'groq', envKey: 'GROQ_API_KEY', defaultModel: 'openai/gpt-oss-20b' },
   'openrouter-free-auto': { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY', defaultModel: 'openrouter/free' },
