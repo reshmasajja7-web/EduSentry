@@ -1,0 +1,180 @@
+/* ── Career Guidance – Futuristic AI Companion styles ─────────────── */
+
+/* Skill-bar fill animation */
+.cg-bar { width: 0%; transition: width 1s cubic-bezier(0.4, 0, 0.2, 1) forwards; }
+.cg-bar.animated { width: var(--bar-pct); }
+
+/* Roadmap connecting line animation */
+.cg-line-active {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow), 0 0 16px var(--accent-glow);
+}
+
+/* Slide-up entrance */
+@keyframes cgSlideUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.cg-slide-up {
+  animation: cgSlideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+/* Compass ring pulse */
+@keyframes cgCompassPulse {
+  0%, 100% { opacity: 0.2; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(1.02); }
+}
+.cg-compass-pulse {
+  animation: cgCompassPulse 3s ease-in-out infinite;
+}
+
+/* Card entrance stagger */
+.cg-card-enter {
+  animation: cgSlideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+/* Smooth border glow on hover for career cards */
+.cg-card-glow {
+  transition: box-shadow 0.3s ease, transform 0.3s ease, border-color 0.3s ease;
+}
+.cg-card-glow:hover {
+  box-shadow: 0 8px 32px var(--shadow-color), 0 0 20px var(--accent-glow);
+  border-color: var(--accent-dim) !important;
+  transform: translateY(-4px);
+}
+
+/* Roadmap step glow */
+.cg-step-glow {
+  transition: box-shadow 0.3s ease, border-color 0.3s ease, transform 0.3s ease;
+}
+.cg-step-glow:hover {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 16px var(--accent-glow);
+}
+
+/* XP bar fill */
+.cg-xp-bar {
+  width: 0%;
+  transition: width 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+.cg-xp-bar.animated { width: var(--xp-pct); }
+
+/* Detail panel enter */
+@keyframes cgDetailEnter {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.cg-detail-enter {
+  animation: cgDetailEnter 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* AI message entrance */
+@keyframes cgMsgEnter {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.cg-msg-enter {
+  animation: cgMsgEnter 0.3s ease-out forwards;
+}
+
+/* Floating accent dots for compass bg */
+@keyframes cgFloatDot {
+  0%, 100% { transform: translateY(0px) rotate(0deg); opacity: 0.15; }
+  50%      { transform: translateY(-12px) rotate(180deg); opacity: 0.35; }
+}
+.cg-float-dot {
+  animation: cgFloatDot var(--d, 4s) ease-in-out infinite;
+  animation-delay: var(--dd, 0s);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .cg-compass-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Edusentry base-theme bridge: scoped to Career Guidance only. */
+.career-guidance-root {
+  --bg-base: #0B1020;
+  --bg-secondary: #151D2E;
+  --bg-tertiary: #1D2740;
+  --bg-card: rgba(21, 29, 46, 0.92);
+  --bg-card-hover: #1B263D;
+  --text-primary: #FFFFFF;
+  --text-secondary: #F1F5F9;
+  --text-muted: #CBD5E1;
+  --border-primary: #293653;
+  --border-hover: #3A4968;
+  --glass-bg: rgba(21, 29, 46, 0.88);
+  --glass-border: #293653;
+  --shadow-color: rgba(0,0,0,0.32);
+  --accent: #E8A33D;
+  --accent-light: #F0B64E;
+  --accent-dim: #8A6125;
+  --accent-bg: #3A2B16;
+  --accent-glow: rgba(232,163,61,0.28);
+}
+
+:root[data-theme="light"] .career-guidance-root,
+.theme-light .career-guidance-root {
+  --bg-base: #f4f6fb;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-card-hover: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #1e293b;
+  --text-muted: #64748b;
+  --border-primary: #e2e8f0;
+  --border-hover: #cbd5e1;
+  --glass-bg: rgba(255, 255, 255, 0.95);
+  --glass-border: #e2e8f0;
+  --shadow-color: rgba(15, 23, 42, 0.06);
+  --accent: #d97706;
+  --accent-light: #f59e0b;
+  --accent-dim: #b45309;
+  --accent-bg: rgba(217, 119, 6, 0.1);
+  --accent-glow: rgba(217, 119, 6, 0.2);
+}
+
+@keyframes cgFloatGentle { 0%,100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-4px) rotate(1deg); } }
+@keyframes cgSpin { to { transform: rotate(360deg); } }
+@keyframes cgOrbit { from { transform: rotate(0deg) translateX(20px) rotate(0deg); } to { transform: rotate(360deg) translateX(20px) rotate(-360deg); } }
+@keyframes cgBounceSubtle { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+.career-guidance-root .animate-float-gentle { animation: cgFloatGentle 4s ease-in-out infinite; }
+.career-guidance-root .animate-spin-slow { animation: cgSpin 8s linear infinite; }
+.career-guidance-root .animate-ai-orbit { animation: cgOrbit 8s linear infinite; }
+.career-guidance-root .animate-bounce-subtle { animation: cgBounceSubtle 2s ease-in-out infinite; }
+.career-guidance-root .shadow-elevated { box-shadow: 0 8px 24px var(--shadow-color), 0 16px 48px var(--shadow-color); }
+
+/* Interactive Career Roadmap styles */
+.cg-timeline-line {
+  height: 3px;
+  background: var(--border-primary);
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cg-timeline-line.active {
+  background: linear-gradient(90deg, var(--accent), var(--accent-light));
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+@keyframes cgNodePulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); transform: scale(1); }
+  50% { box-shadow: 0 0 0 8px var(--accent-glow); transform: scale(1.04); }
+}
+.cg-node-pulse {
+  animation: cgNodePulse 2.4s ease-in-out infinite;
+}
+
+.cg-task-item {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.cg-task-item:hover {
+  background: var(--bg-tertiary) !important;
+  border-color: var(--border-hover) !important;
+  transform: translateX(3px);
+}
+

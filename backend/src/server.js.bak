@@ -1,0 +1,2339 @@
+import 'dotenv/config'
+
+import express from 'express'
+import cors from 'cors'
+import cookieParser from 'cookie-parser'
+import bcrypt from 'bcryptjs'
+import crypto from 'crypto'
+import { resolveMx } from 'node:dns/promises'
+import nodemailer from 'nodemailer'
+import fs from 'fs/promises'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+import { query, pool } from './db.js'
+import {
+  clearAuthCookie,
+  requireAuth,
+  optionalAuth,
+  setAuthCookie,
+  signToken,
+} from './auth.js'
+
+import {
+  getDefaultEngagement,
+  predictRisk,
+} from './earlyRisk.js'
+import { sendSmsOtp } from './sms.js'
+import { validateEmailSyntax, passwordValidationError, normalizeIndianPhone } from './validation.js'
+import { RAG_MODEL_CONFIG, SUPPORTED_RAG_MODELS } from './ragModels.js'
+import { generateWithProvider } from './aiProvider.js'
+
+const app = express()
+
+const PORT = Number(process.env.PORT || 5000)
+
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || 'http://localhost:5173'
+
+const smtpConfigured =
+  Boolean(process.env.SMTP_USER) &&
+  Boolean(process.env.SMTP_PASS)
+
+const mailTransporter = smtpConfigured
+  ? nodemailer.createTransport(
+      process.env.SMTP_HOST
+        ? {
+            host: process.env.SMTP_HOST,
+            port: Number(process.env.SMTP_PORT || 587),
+            secure:
+              process.env.SMTP_SECURE !== undefined
+                ? String(process.env.SMTP_SECURE) === 'true'
+                : Number(process.env.SMTP_PORT) === 465,
+            auth: {
+              user: process.env.SMTP_USER,
+              pass: process.env.SMTP_PASS,
+            },
+            tls: {
+              rejectUnauthorized:
+                process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== 'false',
+            },
+          }
+        : {
+            service: 'gmail',
+            auth: {
+              user: process.env.SMTP_USER,
+              pass: process.env.SMTP_PASS,
+            },
+          }
+    )
+  : null
+
+if (smtpConfigured && mailTransporter) {
+  mailTransporter.verify((err) => {
+    if (err) {
+      console.warn('⚠️  [SMTP] Email transport verification failed:', err.message)
+    } else {
+      console.log('✅ [SMTP] Email transport ready to dispatch verification codes directly to mail inboxes.')
+    }
+  })
+}
+
+async function sendPasswordOtpEmail(email, otp) {
+  if (!mailTransporter) {
+    throw new Error(
+      'Email service (SMTP) is not configured in backend/.env. Please configure SMTP_USER and SMTP_PASS.'
+    )
+  }
+
+  const senderFrom =
+    process.env.SMTP_FROM || `"EduSentry Security" <${process.env.SMTP_USER}>`
+
+  await mailTransporter.sendMail({
+    from: senderFrom,
+    to: email,
+    subject: '🛡️ EduSentry Password Reset Verification Code',
+    text: `Your EduSentry 6-digit verification code is: ${otp}\n\nThis code is valid for 15 minutes.\nIf you did not request a password reset, please secure your account immediately or ignore this email.`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #060b13; color: #e2e8f0; margin: 0; padding: 30px 15px; }
+          .container { max-width: 540px; margin: 0 auto; background: #0c1527; border: 1px solid #1e293b; border-radius: 16px; overflow: hidden; box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+          .header { background: linear-gradient(135deg, #0e1d38 0%, #081120 100%); padding: 28px 32px; border-bottom: 1px solid #1e2e4a; text-align: center; }
+          .brand { font-size: 22px; font-weight: 800; color: #ffffff; letter-spacing: 1px; display: inline-flex; align-items: center; gap: 8px; }
+          .brand-badge { background: #f5b722; color: #060b13; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }
+          .content { padding: 32px; color: #cbd5e1; font-size: 15px; line-height: 1.6; }
+          .title { font-size: 20px; font-weight: 700; color: #ffffff; margin-top: 0; margin-bottom: 14px; }
+          .otp-card { margin: 26px 0; padding: 22px; background: #111e35; border: 1px solid #283e65; border-radius: 12px; text-align: center; }
+          .otp-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: #f5b722; margin-bottom: 8px; }
+          .otp-code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; font-size: 38px; font-weight: 800; letter-spacing: 10px; color: #ffffff; margin: 6px 0; }
+          .otp-expiry { font-size: 12px; color: #94a3b8; margin-top: 6px; }
+          .warning { font-size: 13px; color: #94a3b8; border-top: 1px solid #1e293b; padding-top: 18px; margin-top: 24px; line-height: 1.5; }
+          .footer { background: #080e1a; padding: 18px 32px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #172338; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="brand">
+              🛡️ EDUSENTRY <span class="brand-badge">SECURE</span>
+            </div>
+          </div>
+          <div class="content">
+            <h2 class="title">Password Reset Verification</h2>
+            <p>Hello,</p>
+            <p>We received a request to reset the password for your EduSentry account (<strong>${email}</strong>). Use the 6-digit verification code below to complete the verification process:</p>
+            
+            <div class="otp-card">
+              <div class="otp-label">Verification Code</div>
+              <div class="otp-code">${otp}</div>
+              <div class="otp-expiry">⏱️ Valid for 15 minutes. Single-use only.</div>
+            </div>
+
+            <p>Enter this verification code on the EduSentry password reset page to set your new password.</p>
+
+            <div class="warning">
+              🔒 <strong>Security Warning:</strong> EduSentry staff will never ask you for this code. If you did not make this request, please disregard this email or check your account security settings.
+            </div>
+          </div>
+          <div class="footer">
+            &copy; ${new Date().getFullYear()} EduSentry Platform. All rights reserved.
+          </div>
+        </div>
+      </body>
+      </html>
+    `,
+  })
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow any origin in dev/local network testing (localhost, 127.0.0.1, 192.168.*, mobile browsers)
+      callback(null, true)
+    },
+    credentials: true,
+  })
+)
+
+app.use(express.json({ limit: '10mb' }))
+app.use(cookieParser())
+
+const asyncRoute = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next)
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+// In-memory store for phone verification OTPs (phone -> code)
+const phoneOtpStore = new Map()
+
+function publicUser(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    phone: row.phone || null,
+    role: row.role,
+    course: row.course,
+    careerGoal: row.career_goal,
+    createdAt: row.created_at,
+  }
+}
+
+/*
+ * PostgreSQL JSON/JSONB helper.
+ *
+ * This is important for Career Guidance because arrays such as:
+ *
+ * ["Performing Arts", "Technology"]
+ *
+ * must be inserted as valid JSON.
+ */
+function toJson(value, fallback = null) {
+  if (value === undefined || value === null) {
+    return fallback
+  }
+
+  if (typeof value === 'string') {
+    try {
+      JSON.parse(value)
+      return value
+    } catch {
+      return JSON.stringify(value)
+    }
+  }
+
+  return JSON.stringify(value)
+}
+
+// ============================================================
+// HEALTH
+// ============================================================
+
+app.get(
+  '/api/health',
+  asyncRoute(async (_req, res) => {
+    const result = await query('SELECT NOW() AS now')
+
+    res.json({
+      ok: true,
+      database: 'connected',
+      time: result.rows[0].now,
+    })
+  })
+)
+
+// ============================================================
+// ENGAGEMENT & STREAK COMPUTATION
+// ============================================================
+
+async function computeUserEngagement(userId) {
+  const quizzes = await query(
+    `
+    SELECT score, total
+    FROM quiz_results
+    WHERE user_id = $1
+    ORDER BY created_at DESC
+    LIMIT 20
+    `,
+    [userId]
+  )
+
+  const activities = await query(
+    `
+    SELECT type, created_at
+    FROM activities
+    WHERE user_id = $1
+    ORDER BY created_at DESC
+    LIMIT 1000
+    `,
+    [userId]
+  )
+
+  const sessions = await query(
+    `
+    SELECT started_at, ended_at, duration_seconds
+    FROM study_sessions
+    WHERE user_id = $1
+      AND started_at >= NOW() - INTERVAL '30 days'
+    ORDER BY started_at DESC
+    `,
+    [userId]
+  )
+
+  const quizAverage = quizzes.rowCount
+    ? Math.round(
+        quizzes.rows.reduce(
+          (sum, q) => sum + (Number(q.score) / Number(q.total)) * 100,
+          0
+        ) / quizzes.rowCount
+      )
+    : 0
+
+  const today = new Date()
+  const dateKey = (value) => new Date(value).toISOString().slice(0, 10)
+  const daysAgo = (days) => {
+    const d = new Date(today)
+    d.setDate(d.getDate() - days)
+    return d
+  }
+  const startOfTodayUtc = new Date(today)
+  startOfTodayUtc.setUTCHours(0, 0, 0, 0)
+
+  const sessionDates = new Set(sessions.rows.map((s) => dateKey(s.started_at)))
+  const activityDates = new Set(activities.rows.map((a) => dateKey(a.created_at)))
+  const activeDates = new Set([...sessionDates, ...activityDates])
+
+  const recent14Start = new Date(startOfTodayUtc)
+  recent14Start.setUTCDate(recent14Start.getUTCDate() - 13)
+  const recent14Dates = new Set(
+    [...activeDates].filter((day) => new Date(`${day}T00:00:00Z`) >= recent14Start)
+  )
+  const studyConsistency = Math.round((recent14Dates.size / 14) * 100)
+
+  let studyStreak = 0
+  const streakCursor = new Date(today)
+  const todayKey = dateKey(today)
+  if (!activeDates.has(todayKey)) {
+    streakCursor.setDate(streakCursor.getDate() - 1)
+  }
+  while (activeDates.has(dateKey(streakCursor))) {
+    studyStreak += 1
+    streakCursor.setDate(streakCursor.getDate() - 1)
+  }
+
+  const last7Start = daysAgo(6)
+  const weeklySeconds = sessions.rows
+    .filter((s) => new Date(s.started_at) >= last7Start)
+    .reduce((sum, s) => sum + Number(s.duration_seconds || 0), 0)
+  const studyHours = Math.round((weeklySeconds / 3600 / 7) * 100) / 100
+
+  const revisionDates = new Set(
+    activities.rows
+      .filter((a) => a.type === 'flashcards')
+      .map((a) => dateKey(a.created_at))
+  )
+  const recent30Start = new Date(startOfTodayUtc)
+  recent30Start.setUTCDate(recent30Start.getUTCDate() - 29)
+  const recentActive30 = [...activeDates].filter(
+    (day) => new Date(`${day}T00:00:00Z`) >= recent30Start
+  )
+  const revisionFrequency = recentActive30.length
+    ? Math.round(
+        (recentActive30.filter((day) => revisionDates.has(day)).length /
+          recentActive30.length) *
+          100
+      )
+    : 0
+
+  const tutorInteractions = activities.rows.filter(
+    (a) => a.type === 'tutor_interaction'
+  ).length
+
+  const learningActivityTypes = new Set(
+    activities.rows
+      .map((a) => a.type)
+      .filter((type) =>
+        ['upload', 'tutor_interaction', 'summary', 'flashcards', 'quiz'].includes(type)
+      )
+  )
+  const topicsCompleted = Math.round(
+    (learningActivityTypes.size / 5) * 100
+  )
+
+  return {
+    quizAverage,
+    quizzesCount: quizzes.rowCount,
+    studyHours,
+    topicsCompleted,
+    studyConsistency,
+    revisionFrequency,
+    studyStreak,
+    aiTutorInteractions: tutorInteractions,
+    metricsSource: 'PostgreSQL platform activity and study sessions',
+  }
+}
+
+// ============================================================
+// DASHBOARD
+// ============================================================
+
+/*
+ * Dashboard summary endpoint.
+ *
+ * Reads real-time PostgreSQL data across all modules:
+ * indexed document count, latest risk assessment, active selected career target,
+ * and synchronized study streak.
+ */
+app.get(
+  '/api/dashboard/summary',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const userId = req.auth.sub
+
+    const result = await query(
+      `
+      WITH document_stats AS (
+        SELECT COUNT(*)::INTEGER AS count
+        FROM documents
+        WHERE user_id = $1
+          AND is_sample = FALSE
+          AND status = 'indexed'
+      ),
+      latest_risk AS (
+        SELECT
+          risk_level AS level,
+          risk_score AS score
+        FROM risk_predictions
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+      ),
+      latest_career AS (
+        SELECT
+          career,
+          match_percent AS pct
+        FROM career_results
+        WHERE user_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+      ),
+      career_prog AS (
+        SELECT selected_career
+        FROM career_progress
+        WHERE user_id = $1
+        LIMIT 1
+      ),
+      usr_info AS (
+        SELECT career_goal
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+      )
+      SELECT
+        (SELECT count FROM document_stats) AS "documentCount",
+        (SELECT row_to_json(latest_risk) FROM latest_risk) AS risk,
+        (SELECT row_to_json(latest_career) FROM latest_career) AS career,
+        (SELECT selected_career FROM career_prog) AS "selectedCareer",
+        (SELECT career_goal FROM usr_info) AS "careerGoal"
+      `,
+      [userId]
+    )
+
+    const row = result.rows[0] || {}
+
+    let risk = row.risk || null
+    let career = row.career || null
+
+    if (typeof risk === 'string') {
+      try {
+        risk = JSON.parse(risk)
+      } catch {
+        risk = null
+      }
+    }
+
+    if (typeof career === 'string') {
+      try {
+        career = JSON.parse(career)
+      } catch {
+        career = null
+      }
+    }
+
+    // Prioritize the user's explicitly selected career from Career Guidance
+    const activeSelectedCareer = row.selectedCareer || row.careerGoal || null
+    if (activeSelectedCareer) {
+      const careerName = career?.career?.name || career?.career || career?.name
+      if (!career || careerName !== activeSelectedCareer) {
+        career = {
+          name: activeSelectedCareer,
+          career: { name: activeSelectedCareer },
+          pct: career?.pct || 94,
+        }
+      }
+    }
+
+    const docsResult = await query(
+      `
+      SELECT id, name, size_label, status, created_at
+      FROM documents
+      WHERE user_id = $1
+        AND is_sample = FALSE
+      ORDER BY created_at DESC
+      LIMIT 8
+      `,
+      [userId]
+    )
+
+    const sessionsResult = await query(
+      `
+      SELECT started_at, duration_seconds
+      FROM study_sessions
+      WHERE user_id = $1
+        AND started_at >= NOW() - INTERVAL '30 days'
+      ORDER BY started_at ASC
+      `,
+      [userId]
+    )
+
+    const engagement = await computeUserEngagement(userId)
+
+    res.json({
+      documentCount: Number(row.documentCount || 0),
+      documents: docsResult.rows,
+      recentSessions: sessionsResult.rows,
+      risk,
+      career,
+      engagement,
+      streak: engagement.studyStreak,
+      studyStreak: engagement.studyStreak,
+      studyHours: engagement.studyHours,
+      quizzes: engagement.quizzesCount,
+    })
+  })
+)
+
+// ============================================================
+// AUTH
+// ============================================================
+
+app.post(
+  '/api/auth/register',
+  asyncRoute(async (req, res) => {
+    const {
+      name,
+      email,
+      phone,
+      password,
+      role = 'student',
+    } = req.body
+
+    if (!name?.trim() || !email?.trim() || !phone?.trim() || !password) {
+      return res.status(400).json({
+        error: 'Name, email, phone number and password are required.',
+      })
+    }
+
+    const emailValidation = validateEmailSyntax(email)
+    if (!emailValidation.valid) {
+      return res.status(400).json({ error: 'Enter a valid email address.' })
+    }
+    const normalizedEmail = emailValidation.normalized
+
+    const passwordError = passwordValidationError(password)
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError })
+    }
+
+    // Check domain mail routing where DNS is available. This cannot prove that
+    // an individual inbox exists; that would require inbox verification.
+    try {
+      const mx = await resolveMx(emailValidation.domain)
+      if (!Array.isArray(mx) || mx.length === 0) {
+        return res.status(400).json({ error: 'This email domain does not appear to accept email. Check the address and try again.' })
+      }
+    } catch (dnsError) {
+      if (dnsError?.code === 'ENOTFOUND' || dnsError?.code === 'ENODATA' || dnsError?.code === 'ENOTIMP') {
+        return res.status(400).json({ error: 'This email domain does not appear to accept email. Check the address and try again.' })
+      }
+      // Transient DNS/network failures should not falsely reject a valid address.
+      console.warn('[Registration] Could not verify email-domain mail records:', dnsError?.code || dnsError?.message)
+    }
+
+    const phoneValidation = normalizeIndianPhone(phone)
+    if (!phoneValidation.valid) {
+      return res.status(400).json({ error: 'Enter a valid Indian mobile number, e.g. +91 98765 43210.' })
+    }
+    const cleanPhone = phoneValidation.phone
+
+    const exists = await query(
+      'SELECT id FROM users WHERE email = $1',
+      [normalizedEmail]
+    )
+
+    if (exists.rowCount) {
+      return res.status(409).json({
+        error: 'An account with this email already exists.',
+      })
+    }
+
+    if (cleanPhone) {
+      const phoneExists = await query(
+        'SELECT id FROM users WHERE phone = $1',
+        [cleanPhone]
+      )
+      if (phoneExists.rowCount) {
+        return res.status(409).json({
+          error: 'An account with this phone number already exists.',
+        })
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12)
+
+    const result = await query(
+      `
+      INSERT INTO users
+        (name, email, phone, password_hash, role)
+      VALUES
+        ($1, $2, $3, $4, $5)
+      RETURNING *
+      `,
+      [
+        name.trim(),
+        normalizedEmail,
+        cleanPhone,
+        passwordHash,
+        role,
+      ]
+    )
+
+    const user = publicUser(result.rows[0])
+
+    setAuthCookie(res, signToken(user))
+
+    res.status(201).json({ user })
+  })
+)
+
+// Request SMS/Phone Verification Code (OTP)
+app.post(
+  '/api/auth/phone-otp',
+  asyncRoute(async (req, res) => {
+    const { phone } = req.body
+    if (!phone?.trim()) {
+      return res.status(400).json({ error: 'Phone number is required.' })
+    }
+    const cleanPhone = phone.trim().replace(/[\s\-\(\)]/g, '')
+    // Generate a genuine 6-digit random verification code
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString()
+    phoneOtpStore.set(cleanPhone, generatedOtp)
+    setTimeout(() => phoneOtpStore.delete(cleanPhone), 10 * 60 * 1000)
+
+    // Dispatch real SMS to the target phone number via SMS Gateway
+    const smsResult = await sendSmsOtp({ phone: cleanPhone, otp: generatedOtp })
+
+    res.json({
+      ok: true,
+      delivered: smsResult.delivered,
+      provider: smsResult.provider,
+      message: `A 6-digit verification code has been dispatched to ${cleanPhone}. Please check your SMS messages.`,
+    })
+  })
+)
+
+app.post(
+  '/api/auth/login',
+  asyncRoute(async (req, res) => {
+    const { email, phone, identifier, password, otp } = req.body
+    const rawLogin = (identifier || phone || email || '').trim()
+
+    if (!rawLogin) {
+      return res.status(400).json({
+        error: 'Email or phone number is required.',
+      })
+    }
+
+    const cleanPhone = rawLogin.replace(/[\s\-\(\)]/g, '')
+
+    // Phone + OTP instant verification login
+    if (otp) {
+      const cachedOtp = phoneOtpStore.get(cleanPhone)
+      if (!cachedOtp || cachedOtp !== otp.trim()) {
+        return res.status(400).json({
+          error: 'Invalid or expired verification code. Please check your phone SMS and enter the 6-digit code received.',
+        })
+      }
+
+      // Check if user exists with this phone
+      let result = await query(
+        `SELECT * FROM users 
+         WHERE phone = $1 
+            OR phone = $2 
+            OR REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2`,
+        [rawLogin, cleanPhone]
+      )
+
+      let found = result.rows[0]
+      if (!found) {
+        // Auto-provision user account for phone login
+        const autoName = 'Student ' + cleanPhone.slice(-4)
+        const autoEmail = `student_${Date.now()}@edusentry.edu`
+        const dummyHash = await bcrypt.hash('phone_' + Date.now(), 10)
+        const insertRes = await query(
+          `INSERT INTO users (name, email, phone, password_hash, role)
+           VALUES ($1, $2, $3, $4, 'student')
+           RETURNING *`,
+          [autoName, autoEmail, rawLogin, dummyHash]
+        )
+        found = insertRes.rows[0]
+      }
+
+      phoneOtpStore.delete(cleanPhone)
+      const user = publicUser(found)
+      setAuthCookie(res, signToken(user))
+      return res.json({ user })
+    }
+
+    // Password-based login (supports Email OR Phone number)
+    if (!password) {
+      return res.status(400).json({
+        error: 'Password is required.',
+      })
+    }
+
+    const normalizedEmail = rawLogin.toLowerCase()
+
+    const result = await query(
+      `SELECT * FROM users 
+       WHERE email = $1 
+          OR phone = $1 
+          OR phone = $2 
+          OR REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2`,
+      [normalizedEmail, cleanPhone]
+    )
+
+    const found = result.rows[0]
+
+    if (
+      !found ||
+      !(await bcrypt.compare(
+        password,
+        found.password_hash
+      ))
+    ) {
+      return res.status(401).json({
+        error: 'Incorrect email/phone number or password.',
+      })
+    }
+
+    const user = publicUser(found)
+
+    setAuthCookie(res, signToken(user))
+
+    res.json({ user })
+  })
+)
+
+app.post('/api/auth/logout', (_req, res) => {
+  clearAuthCookie(res)
+
+  res.json({ ok: true })
+})
+
+app.get(
+  '/api/auth/me',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      'SELECT * FROM users WHERE id = $1',
+      [req.auth.sub]
+    )
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: 'User not found.',
+      })
+    }
+
+    res.json({
+      user: publicUser(result.rows[0]),
+    })
+  })
+)
+
+app.put(
+  '/api/auth/profile',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      name,
+      course,
+      careerGoal,
+      phone,
+    } = req.body
+
+    const result = await query(
+      `
+      UPDATE users
+      SET
+        name = COALESCE($1, name),
+        course = $2,
+        career_goal = $3,
+        phone = COALESCE($4, phone),
+        updated_at = NOW()
+      WHERE id = $5
+      RETURNING *
+      `,
+      [
+        name?.trim() || null,
+        course ?? null,
+        careerGoal ?? null,
+        phone?.trim() || null,
+        req.auth.sub,
+      ]
+    )
+
+    res.json({
+      user: publicUser(result.rows[0]),
+    })
+  })
+)
+
+app.post(
+  '/api/auth/change-password',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      currentPassword,
+      newPassword,
+    } = req.body
+
+    const newPasswordError = passwordValidationError(newPassword)
+    if (newPasswordError) {
+      return res.status(400).json({ error: newPasswordError.replace('Password', 'New password') })
+    }
+
+    const result = await query(
+      'SELECT password_hash FROM users WHERE id = $1',
+      [req.auth.sub]
+    )
+
+    if (
+      !result.rowCount ||
+      !(await bcrypt.compare(
+        currentPassword || '',
+        result.rows[0].password_hash
+      ))
+    ) {
+      return res.status(400).json({
+        error: 'Current password is incorrect.',
+      })
+    }
+
+    const hash = await bcrypt.hash(
+      newPassword,
+      12
+    )
+
+    await query(
+      `
+      UPDATE users
+      SET
+        password_hash = $1,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [hash, req.auth.sub]
+    )
+
+    res.json({ ok: true })
+  })
+)
+
+app.post(
+  '/api/auth/forgot-password',
+  asyncRoute(async (req, res) => {
+    const email = req.body.email?.trim().toLowerCase()
+
+    if (!email) {
+      return res.status(400).json({
+        error: 'Email address is required.',
+      })
+    }
+
+    const result = await query(
+      'SELECT id, name FROM users WHERE LOWER(email) = LOWER($1)',
+      [email]
+    )
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: 'No EduSentry account found with this email. Please check your spelling or register a new account.',
+      })
+    }
+
+    const userId = result.rows[0].id
+    const otp = String(
+      crypto.randomInt(100000, 1000000)
+    )
+    const otpHash = crypto
+      .createHash('sha256')
+      .update(otp)
+      .digest('hex')
+
+    await query(
+      `
+      DELETE FROM password_reset_tokens
+      WHERE user_id = $1
+         OR expires_at < NOW()
+      `,
+      [userId]
+    )
+
+    await query(
+      `
+      INSERT INTO password_reset_tokens
+        (user_id, token_hash, expires_at)
+      VALUES
+        ($1, $2, NOW() + INTERVAL '15 minutes')
+      `,
+      [userId, otpHash]
+    )
+
+    let emailDelivered = false
+    let mailErrorMsg = null
+
+    if (smtpConfigured && mailTransporter) {
+      try {
+        await sendPasswordOtpEmail(email, otp)
+        emailDelivered = true
+        console.log(`[PASSWORD RESET] Verification email successfully dispatched to ${email}`)
+      } catch (mailError) {
+        mailErrorMsg = mailError.message
+        console.warn('[PASSWORD RESET] SMTP dispatch failed, fallback to server mail log:', mailError.message)
+      }
+    }
+
+    // Always log clean email dispatch details in server console
+    console.log('\n============================================================')
+    console.log(`📧 [EMAIL NOTIFICATION] EduSentry Password Reset`)
+    console.log(`To: ${email}`)
+    console.log(`Subject: 🛡️ EduSentry Password Reset Verification Code`)
+    console.log(`Verification Code: ${otp}`)
+    console.log(`Status: ${emailDelivered ? 'Delivered via SMTP' : 'Queued (SMTP offline or in dev mode)'}`)
+    console.log('============================================================\n')
+
+    res.json({
+      ok: true,
+      emailDelivered,
+      message: `A 6-digit verification code has been dispatched to ${email}. Please check your inbox.`,
+    })
+  })
+)
+
+app.post(
+  '/api/auth/verify-otp',
+  asyncRoute(async (req, res) => {
+    const email = req.body.email?.trim().toLowerCase()
+    const otp = String(req.body.otp || '').trim()
+
+    if (!email || !/^\d{6}$/.test(otp)) {
+      return res.status(400).json({
+        error: 'Enter the 6-digit verification code sent to your email.',
+      })
+    }
+
+    const userResult = await query(
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1)',
+      [email]
+    )
+
+    if (!userResult.rowCount) {
+      return res.status(400).json({
+        error: 'The verification code is invalid or expired.',
+      })
+    }
+
+    const tokenResult = await query(
+      `
+      SELECT id, user_id, token_hash
+      FROM password_reset_tokens
+      WHERE user_id = $1
+        AND used_at IS NULL
+        AND expires_at > NOW()
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [userResult.rows[0].id]
+    )
+
+    if (!tokenResult.rowCount) {
+      return res.status(400).json({
+        error: 'The verification code has expired. Please request a new code.',
+      })
+    }
+
+    const suppliedHash = crypto
+      .createHash('sha256')
+      .update(otp)
+      .digest('hex')
+
+    const storedHash = tokenResult.rows[0].token_hash
+
+    if (
+      suppliedHash.length !== storedHash.length ||
+      !crypto.timingSafeEqual(
+        Buffer.from(suppliedHash),
+        Buffer.from(storedHash)
+      )
+    ) {
+      return res.status(400).json({
+        error: 'Incorrect verification code. Please check the 6-digit code and try again.',
+      })
+    }
+
+    // Replace the one-time OTP with a high-entropy reset token.
+    // The user must successfully verify the OTP before this token exists.
+    const resetToken = crypto.randomBytes(32).toString('hex')
+    const resetTokenHash = crypto
+      .createHash('sha256')
+      .update(resetToken)
+      .digest('hex')
+
+    await query(
+      `
+      UPDATE password_reset_tokens
+      SET
+        token_hash = $1,
+        expires_at = NOW() + INTERVAL '10 minutes'
+      WHERE id = $2
+      `,
+      [resetTokenHash, tokenResult.rows[0].id]
+    )
+
+    res.json({
+      ok: true,
+      resetToken,
+      message: 'Code verified. You can now choose a new password.',
+    })
+  })
+)
+
+app.post(
+  '/api/auth/reset-password',
+  asyncRoute(async (req, res) => {
+    const { resetToken, newPassword } = req.body
+
+    if (!resetToken) {
+      return res.status(400).json({ error: 'A valid verification session is required.' })
+    }
+    const newPasswordError = passwordValidationError(newPassword)
+    if (newPasswordError) {
+      return res.status(400).json({ error: newPasswordError.replace('Password', 'New password') })
+    }
+
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(resetToken)
+      .digest('hex')
+
+    const result = await query(
+      `
+      SELECT *
+      FROM password_reset_tokens
+      WHERE token_hash = $1
+        AND used_at IS NULL
+        AND expires_at > NOW()
+      `,
+      [tokenHash]
+    )
+
+    if (!result.rowCount) {
+      return res.status(400).json({
+        error:
+          'The verification session is invalid or expired. Please request a new code.',
+      })
+    }
+
+    const hash = await bcrypt.hash(newPassword, 12)
+
+    await query(
+      `
+      UPDATE users
+      SET
+        password_hash = $1,
+        updated_at = NOW()
+      WHERE id = $2
+      `,
+      [hash, result.rows[0].user_id]
+    )
+
+    await query(
+      `
+      UPDATE password_reset_tokens
+      SET used_at = NOW()
+      WHERE id = $1
+      `,
+      [result.rows[0].id]
+    )
+
+    res.json({
+      ok: true,
+      message: 'Your password has been reset successfully.',
+    })
+  })
+)
+
+app.delete(
+  '/api/auth/account',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    await query(
+      'DELETE FROM users WHERE id = $1',
+      [req.auth.sub]
+    )
+
+    clearAuthCookie(res)
+
+    res.json({ ok: true })
+  })
+)
+
+// ============================================================
+// PROFILE / ACTIVITY
+// ============================================================
+
+app.get(
+  '/api/profile',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      'SELECT * FROM users WHERE id = $1',
+      [req.auth.sub]
+    )
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: 'User not found.',
+      })
+    }
+
+    res.json({
+      user: publicUser(result.rows[0]),
+    })
+  })
+)
+
+app.get(
+  '/api/activity',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        id,
+        type,
+        meta,
+        created_at AS at
+      FROM activities
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 300
+      `,
+      [req.auth.sub]
+    )
+
+    res.json({
+      activities: result.rows,
+    })
+  })
+)
+
+app.post(
+  '/api/activity',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      type,
+      meta = {},
+    } = req.body
+
+    if (!type) {
+      return res.status(400).json({
+        error: 'Activity type is required.',
+      })
+    }
+
+    const result = await query(
+      `
+      INSERT INTO activities
+        (user_id, type, meta)
+      VALUES
+        ($1, $2, $3)
+      RETURNING
+        id,
+        type,
+        meta,
+        created_at AS at
+      `,
+      [
+        req.auth.sub,
+        type,
+        meta,
+      ]
+    )
+
+    res.status(201).json({
+      activity: result.rows[0],
+    })
+  })
+)
+
+app.delete(
+  '/api/activity',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    await query(
+      'DELETE FROM activities WHERE user_id = $1',
+      [req.auth.sub]
+    )
+
+    res.json({ ok: true })
+  })
+)
+
+// ============================================================
+// DOCUMENTS
+// ============================================================
+
+app.get(
+  '/api/documents',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        id,
+        name,
+        size_label AS size,
+        status,
+        extracted_text AS text,
+        is_sample AS "isSample",
+        created_at
+      FROM documents
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      `,
+      [req.auth.sub]
+    )
+
+    res.json({
+      documents: result.rows,
+    })
+  })
+)
+
+app.post(
+  '/api/documents',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      name,
+      size,
+      text = '',
+    } = req.body
+
+    if (!name) {
+      return res.status(400).json({
+        error: 'Document name is required.',
+      })
+    }
+
+    const result = await query(
+      `
+      INSERT INTO documents
+        (
+          user_id,
+          name,
+          size_label,
+          extracted_text,
+          status
+        )
+      VALUES
+        ($1, $2, $3, $4, 'indexed')
+      RETURNING
+        id,
+        name,
+        size_label AS size,
+        status,
+        extracted_text AS text,
+        is_sample AS "isSample",
+        created_at
+      `,
+      [
+        req.auth.sub,
+        name,
+        size || null,
+        text,
+      ]
+    )
+
+    await query(
+      `
+      INSERT INTO activities
+        (user_id, type, meta)
+      VALUES
+        ($1, $2, $3)
+      `,
+      [
+        req.auth.sub,
+        'upload',
+        {
+          fileName: name,
+        },
+      ]
+    )
+
+    res.status(201).json({
+      document: result.rows[0],
+    })
+  })
+)
+
+app.delete(
+  '/api/documents/:id',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      DELETE FROM documents
+      WHERE id = $1
+        AND user_id = $2
+      RETURNING id
+      `,
+      [
+        req.params.id,
+        req.auth.sub,
+      ]
+    )
+
+    if (!result.rowCount) {
+      return res.status(404).json({
+        error: 'Document not found.',
+      })
+    }
+
+    res.json({ ok: true })
+  })
+)
+
+app.delete(
+  '/api/documents',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    await query(
+      'DELETE FROM documents WHERE user_id = $1',
+      [req.auth.sub]
+    )
+
+    res.json({ ok: true })
+  })
+)
+
+// ============================================================
+// QUIZ
+// ============================================================
+
+app.post(
+  '/api/quiz/results',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      score,
+      total,
+      topic,
+    } = req.body
+
+    if (
+      !Number.isFinite(Number(score)) ||
+      !Number.isFinite(Number(total)) ||
+      Number(total) <= 0
+    ) {
+      return res.status(400).json({
+        error:
+          'Valid score and total are required.',
+      })
+    }
+
+    const result = await query(
+      `
+      INSERT INTO quiz_results
+        (user_id, score, total, topic)
+      VALUES
+        ($1, $2, $3, $4)
+      RETURNING
+        id,
+        score,
+        total,
+        topic,
+        created_at
+      `,
+      [
+        req.auth.sub,
+        Number(score),
+        Number(total),
+        topic || null,
+      ]
+    )
+
+    await query(
+      `
+      INSERT INTO activities
+        (user_id, type, meta)
+      VALUES
+        ($1, $2, $3)
+      `,
+      [
+        req.auth.sub,
+        'quiz',
+        {
+          score: Number(score),
+          total: Number(total),
+          topic: topic || null,
+        },
+      ]
+    )
+
+    res.status(201).json({
+      result: result.rows[0],
+    })
+  })
+)
+
+app.get(
+  '/api/quiz/results',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        id,
+        score,
+        total,
+        topic,
+        created_at
+      FROM quiz_results
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 100
+      `,
+      [req.auth.sub]
+    )
+
+    res.json({
+      results: result.rows,
+    })
+  })
+)
+
+// ============================================================
+// EARLY RISK
+// ============================================================
+
+app.post(
+  '/api/study-sessions',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const { startedAt, endedAt, durationSeconds } = req.body
+
+    const start = new Date(startedAt)
+    const end = new Date(endedAt)
+    const duration = Number(durationSeconds)
+
+    if (
+      Number.isNaN(start.getTime()) ||
+      Number.isNaN(end.getTime()) ||
+      end < start ||
+      !Number.isFinite(duration) ||
+      duration < 1 ||
+      duration > 12 * 60 * 60
+    ) {
+      return res.status(400).json({
+        error: 'A valid study session duration is required.',
+      })
+    }
+
+    const result = await query(
+      `
+      INSERT INTO study_sessions
+        (user_id, started_at, ended_at, duration_seconds)
+      VALUES
+        ($1, $2, $3, $4)
+      RETURNING id, started_at, ended_at, duration_seconds, created_at
+      `,
+      [req.auth.sub, start.toISOString(), end.toISOString(), Math.round(duration)]
+    )
+
+    res.status(201).json({ session: result.rows[0] })
+  })
+)
+
+app.get(
+  '/api/engagement',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const engagement = await computeUserEngagement(req.auth.sub)
+    res.json({ engagement })
+  })
+)
+
+app.post(
+  '/api/earlyrisk/predict',
+  optionalAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      userType,
+      academicData = {},
+      engagementData,
+    } = req.body
+
+    if (
+      !['college', 'self-paced'].includes(
+        userType
+      )
+    ) {
+      return res.status(400).json({
+        error:
+          'userType must be college or self-paced.',
+      })
+    }
+
+    const finalEngagement =
+      engagementData ||
+      getDefaultEngagement()
+
+    const result = predictRisk({
+      userType,
+      academicData,
+      engagementData: finalEngagement,
+    })
+
+    let savedId = 'pred-' + Date.now()
+    let createdAt = new Date().toISOString()
+
+    if (req.auth?.sub) {
+      const saved = await query(
+        `
+        INSERT INTO risk_predictions
+          (
+            user_id,
+            user_type,
+            academic_data,
+            engagement_data,
+            result,
+            risk_score,
+            risk_level,
+            confidence
+          )
+        VALUES
+          ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING
+          id,
+          created_at
+        `,
+        [
+          req.auth.sub,
+          userType,
+          toJson(academicData, {}),
+          toJson(finalEngagement, {}),
+          toJson(result, {}),
+          result.riskScore,
+          result.riskLevel,
+          result.confidence,
+        ]
+      )
+
+      await query(
+        `
+        INSERT INTO activities
+          (user_id, type, meta)
+        VALUES
+          ($1, $2, $3)
+        `,
+        [
+          req.auth.sub,
+          'risk',
+          {
+            level: result.riskLevel,
+            score: result.riskScore,
+          },
+        ]
+      )
+
+      savedId = saved.rows[0].id
+      createdAt = saved.rows[0].created_at
+    }
+
+    res.json({
+      prediction: {
+        ...result,
+        id: savedId,
+        createdAt,
+      },
+    })
+  })
+)
+
+app.get(
+  '/api/earlyrisk/history',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        id,
+        user_type AS "userType",
+        risk_score AS score,
+        risk_level AS level,
+        confidence,
+        result,
+        created_at AS at
+      FROM risk_predictions
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 50
+      `,
+      [req.auth.sub]
+    )
+
+    res.json({
+      history: result.rows,
+    })
+  })
+)
+
+// ============================================================
+// CAREER GUIDANCE
+// ============================================================
+
+app.post(
+  '/api/career/results',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      selectedInterests = [],
+      inputText = '',
+      career,
+      matchPercent,
+    } = req.body
+
+    // --------------------------------------------------------
+    // Validate career
+    // --------------------------------------------------------
+
+    if (
+      !career ||
+      typeof career !== 'object' ||
+      !career.name
+    ) {
+      return res.status(400).json({
+        error:
+          'Career result is required.',
+      })
+    }
+
+    // --------------------------------------------------------
+    // Validate match percentage
+    // --------------------------------------------------------
+
+    if (
+      !Number.isFinite(
+        Number(matchPercent)
+      )
+    ) {
+      return res.status(400).json({
+        error:
+          'A valid career match percentage is required.',
+      })
+    }
+
+    // --------------------------------------------------------
+    // Normalize interests
+    // --------------------------------------------------------
+
+    let normalizedInterests = []
+
+    if (Array.isArray(selectedInterests)) {
+      normalizedInterests =
+        selectedInterests
+    } else if (
+      typeof selectedInterests === 'string'
+    ) {
+      try {
+        const parsed =
+          JSON.parse(selectedInterests)
+
+        normalizedInterests =
+          Array.isArray(parsed)
+            ? parsed
+            : [selectedInterests]
+      } catch {
+        normalizedInterests = [
+          selectedInterests,
+        ]
+      }
+    } else if (
+      selectedInterests !== null &&
+      selectedInterests !== undefined
+    ) {
+      normalizedInterests = [
+        selectedInterests,
+      ]
+    }
+
+    // --------------------------------------------------------
+    // IMPORTANT JSON FIX
+    //
+    // PostgreSQL JSON/JSONB columns require:
+    //
+    // ["Performing Arts"]
+    //
+    // NOT:
+    //
+    // {"Performing Arts"}
+    // --------------------------------------------------------
+
+    const interestsJson =
+      JSON.stringify(
+        normalizedInterests
+      )
+
+    const careerJson =
+      JSON.stringify(career)
+
+    // --------------------------------------------------------
+    // Save career result
+    // --------------------------------------------------------
+
+    const result = await query(
+      `
+      INSERT INTO career_results
+        (
+          user_id,
+          selected_interests,
+          input_text,
+          career,
+          match_percent
+        )
+      VALUES
+        ($1, $2::jsonb, $3, $4::jsonb, $5)
+      RETURNING
+        id,
+        created_at
+      `,
+      [
+        req.auth.sub,
+        interestsJson,
+        inputText || '',
+        careerJson,
+        Number(matchPercent),
+      ]
+    )
+
+    // --------------------------------------------------------
+    // Save activity
+    // --------------------------------------------------------
+
+    await query(
+      `
+      INSERT INTO activities
+        (user_id, type, meta)
+      VALUES
+        ($1, $2, $3)
+      `,
+      [
+        req.auth.sub,
+        'career',
+        {
+          career: career.name,
+          pct: Number(matchPercent),
+        },
+      ]
+    )
+
+    // --------------------------------------------------------
+    // Return result
+    // --------------------------------------------------------
+
+    res.status(201).json({
+      result: {
+        id: result.rows[0].id,
+        career,
+        pct: Number(matchPercent),
+        at: result.rows[0].created_at,
+      },
+    })
+  })
+)
+
+app.get(
+  '/api/career/results/latest',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        career,
+        match_percent AS pct,
+        created_at AS at
+      FROM career_results
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [req.auth.sub]
+    )
+
+    if (!result.rows[0]) {
+      return res.json({
+        result: null,
+      })
+    }
+
+    const careerData =
+      result.rows[0].career
+
+    /*
+     * Depending on PostgreSQL/client configuration,
+     * JSONB may already be parsed into an object.
+     *
+     * This makes the endpoint work safely either way.
+     */
+    let career
+
+    if (
+      typeof careerData === 'string'
+    ) {
+      try {
+        career = JSON.parse(
+          careerData
+        )
+      } catch {
+        career = {
+          name: careerData,
+        }
+      }
+    } else {
+      career = careerData || {}
+    }
+
+    res.json({
+      result: {
+        ...career,
+        pct: result.rows[0].pct,
+        at: result.rows[0].at,
+      },
+    })
+  })
+)
+
+// ============================================================
+// CAREER GUIDANCE PROGRESS
+// ============================================================
+
+app.get(
+  '/api/career/progress',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        xp,
+        roadmap_step AS "roadmapStep",
+        selected_career AS "selectedCareer",
+        achievements
+      FROM career_progress
+      WHERE user_id = $1
+      LIMIT 1
+      `,
+      [req.auth.sub]
+    )
+
+    if (!result.rowCount) {
+      return res.json({
+        progress: {
+          xp: 2450,
+          roadmapStep: 0,
+          selectedCareer: null,
+          achievements: [],
+        },
+      })
+    }
+
+    const row = result.rows[0]
+    res.json({
+      progress: {
+        xp: Number(row.xp),
+        roadmapStep: Number(row.roadmapStep),
+        selectedCareer: row.selectedCareer || null,
+        achievements: Array.isArray(row.achievements) ? row.achievements : [],
+      },
+    })
+  })
+)
+
+app.put(
+  '/api/career/progress',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const xp = Math.max(0, Math.floor(Number(req.body.xp ?? 2450)))
+    const roadmapStep = Math.max(0, Math.floor(Number(req.body.roadmapStep ?? 0)))
+    const selectedCareer = req.body.selectedCareer ? String(req.body.selectedCareer).slice(0, 160) : null
+    const achievements = Array.isArray(req.body.achievements) ? req.body.achievements : []
+
+    const result = await query(
+      `
+      INSERT INTO career_progress
+        (user_id, xp, roadmap_step, selected_career, achievements, updated_at)
+      VALUES
+        ($1, $2, $3, $4, $5::jsonb, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET
+        xp = EXCLUDED.xp,
+        roadmap_step = EXCLUDED.roadmap_step,
+        selected_career = EXCLUDED.selected_career,
+        achievements = EXCLUDED.achievements,
+        updated_at = NOW()
+      RETURNING
+        xp,
+        roadmap_step AS "roadmapStep",
+        selected_career AS "selectedCareer",
+        achievements
+      `,
+      [req.auth.sub, xp, roadmapStep, selectedCareer, JSON.stringify(achievements)]
+    )
+
+    if (selectedCareer) {
+      await query(
+        `UPDATE users SET career_goal = $1 WHERE id = $2`,
+        [selectedCareer, req.auth.sub]
+      ).catch((err) => console.warn('Could not update user career_goal:', err.message))
+
+      // Also ensure a career_results entry exists for this selected career
+      await query(
+        `
+        INSERT INTO career_results
+          (user_id, selected_interests, input_text, career, match_percent)
+        VALUES
+          ($1, '[]'::jsonb, '', $2::jsonb, 95)
+        `,
+        [req.auth.sub, JSON.stringify({ name: selectedCareer })]
+      ).catch((err) => console.warn('Could not insert career_result:', err.message))
+    }
+
+    const row = result.rows[0]
+    res.json({
+      progress: {
+        xp: Number(row.xp),
+        roadmapStep: Number(row.roadmapStep),
+        selectedCareer: row.selectedCareer || null,
+        achievements: Array.isArray(row.achievements) ? row.achievements : [],
+      },
+    })
+  })
+)
+
+// ============================================================
+// TUTOR
+// ============================================================
+
+app.post(
+  '/api/tutor/messages',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const {
+      question,
+      answer,
+      citation = null,
+    } = req.body
+
+    if (!question || !answer) {
+      return res.status(400).json({
+        error:
+          'Question and answer are required.',
+      })
+    }
+
+    const result = await query(
+      `
+      INSERT INTO tutor_messages
+        (
+          user_id,
+          question,
+          answer,
+          citation
+        )
+      VALUES
+        ($1, $2, $3, $4)
+      RETURNING
+        id,
+        question,
+        answer,
+        citation,
+        created_at
+      `,
+      [
+        req.auth.sub,
+        question,
+        answer,
+        citation,
+      ]
+    )
+
+    res.status(201).json({
+      message: result.rows[0],
+    })
+  })
+)
+
+app.get(
+  '/api/tutor/messages',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const result = await query(
+      `
+      SELECT
+        id,
+        question,
+        answer,
+        citation,
+        created_at
+      FROM tutor_messages
+      WHERE user_id = $1
+      ORDER BY created_at ASC
+      LIMIT 200
+      `,
+      [req.auth.sub]
+    )
+
+    res.json({
+      messages: result.rows,
+    })
+  })
+)
+
+// ============================================================
+// RAG & MULTI-LLM APIS
+// ============================================================
+
+app.get(
+  '/api/rag/models',
+  (_req, res) => {
+    res.json({
+      models: SUPPORTED_RAG_MODELS,
+      hasServerGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+      hasServerGroqKey: Boolean(process.env.GROQ_API_KEY),
+      hasServerOpenRouterKey: Boolean(process.env.OPENROUTER_API_KEY),
+      configuredProviders: { gemini: Boolean(process.env.GEMINI_API_KEY), groq: Boolean(process.env.GROQ_API_KEY), openrouter: Boolean(process.env.OPENROUTER_API_KEY), mistral: Boolean(process.env.MISTRAL_API_KEY), nvidia: Boolean(process.env.NVIDIA_NIM_API_KEY), cloudflare: Boolean(process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID), ollama: true },
+    })
+  }
+)
+
+
+function selectRelevantDocumentContext(question, docs, topK = 4) {
+  const terms = [...new Set(String(question).toLowerCase().match(/[a-z0-9_+-]{3,}/g) || [])]
+  if (!terms.length || !Array.isArray(docs)) return []
+  const chunks = []
+  for (const doc of docs.slice(0, 30)) {
+    const fileName = String(doc?.fileName || doc?.name || 'Uploaded document').slice(0, 200)
+    const text = String(doc?.text || '').slice(0, 100000)
+    // Paragraph-level retrieval keeps context relevant and bounded.
+    const paragraphs = text.split(/\n\s*\n/).map((value) => value.trim()).filter(Boolean)
+    for (const paragraph of paragraphs) {
+      const normalized = paragraph.toLowerCase()
+      const score = terms.reduce((sum, term) => sum + (normalized.includes(term) ? 1 : 0), 0)
+      if (score > 0) chunks.push({ fileName, text: paragraph.slice(0, 1800), score })
+    }
+  }
+  return chunks.sort((a, b) => b.score - a.score).slice(0, Math.max(1, Math.min(Number(topK) || 4, 8)))
+}
+
+function makeTutorSystemPrompt(mode, context) {
+  const basePrompt = [
+    'You are EduSentry, a capable, friendly, general-purpose AI assistant and learning tutor.',
+    'Answer the user’s actual question, not only questions about uploaded documents.',
+    'Handle topic changes naturally and use conversation history for follow-up questions.',
+    'Be accurate and candid about uncertainty. Never invent facts, citations, tools, or document contents.',
+    'Use clear Markdown, headings and code blocks when useful. Explain technical ideas in a student-friendly way.',
+    'For programming questions, provide runnable examples when appropriate and explain important parts.',
+  ].join(' ')
+  if (mode === 'socratic') {
+    return `${basePrompt} Use a Socratic teaching style: explain enough to help, then end with one useful question that checks understanding.`
+  }
+  if (mode === 'strict') {
+    return `${basePrompt} The user requested strict academic grounding. If relevant uploaded-document context is provided, answer only from that context and explicitly say when it does not contain the answer. If no relevant context is provided, state that the uploaded documents do not cover the question; do not substitute outside knowledge.`
+  }
+  return context.length
+    ? `${basePrompt} Uploaded-document excerpts are provided as supplemental context. Use them when relevant, but you may also answer general questions from your model knowledge. Do not claim a document supports a fact unless the excerpt actually does.`
+    : basePrompt
+}
+
+app.post(
+  '/api/rag/generate',
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const { question, history = [], docs = [], contextChunks, modelId = 'edusentry-neural', mode = 'pedagogical', topK = 4 } = req.body || {}
+    if (typeof question !== 'string' || !question.trim()) {
+      return res.status(400).json({ error: 'Enter a message before sending.' })
+    }
+    if (question.length > 12000) {
+      return res.status(413).json({ error: 'Your message is too long. Please shorten it and try again.' })
+    }
+    if (!Array.isArray(history) || !Array.isArray(docs)) {
+      return res.status(400).json({ error: 'Conversation history and documents must be lists.' })
+    }
+
+    const context = Array.isArray(contextChunks)
+      ? contextChunks.slice(0, Math.max(1, Math.min(Number(topK) || 4, 8)))
+          .filter((chunk) => typeof chunk?.text === 'string' && chunk.text.trim())
+          .map((chunk) => ({
+            fileName: String(chunk.fileName || 'Uploaded document').slice(0, 200),
+            text: String(chunk.text).slice(0, 1800),
+            score: Number(chunk.score) || 0,
+            id: String(chunk.id || ''),
+          }))
+      : selectRelevantDocumentContext(question, docs, topK)
+    const contextText = context.map((chunk, index) =>
+      `[Excerpt ${index + 1} | Source: ${chunk.fileName}]\n${chunk.text}`
+    ).join('\n\n---\n\n')
+
+    if (mode === 'strict' && !context.length) {
+      return res.json({
+        text: 'I could not find relevant information for this question in your uploaded documents. In Strict Academic Grounding mode, I only answer from relevant uploaded material. Switch to Deep Tutor mode for a general answer.',
+        citations: [],
+        model: 'Document-grounded response',
+        suggestedQuestions: [],
+      })
+    }
+
+    if (modelId === 'edusentry-neural') {
+      if (!context.length) {
+        return res.status(503).json({
+          error: 'The built-in offline mode retrieves uploaded notes only. For general-purpose answers, configure a free-tier eligible Groq or Gemini API key in backend/.env and select that model.',
+          code: 'MODEL_NOT_CONFIGURED',
+        })
+      }
+      const snippets = context.map((chunk) => `**${chunk.fileName}:** ${chunk.text}`).join('\n\n')
+      return res.json({
+        text: `### From your uploaded material\n\n${snippets}\n\n*This response is retrieved from your uploaded documents; it was not generated by an external language model.*`,
+        citations: context.map((chunk, index) => ({ id: index + 1, fileName: chunk.fileName, excerpt: chunk.text.slice(0, 220), score: chunk.score })),
+        model: 'EduSentry Neural RAG',
+        suggestedQuestions: [],
+      })
+    }
+
+    const config = RAG_MODEL_CONFIG[modelId]
+    if (!config) return res.status(400).json({ error: 'The selected AI model is not supported.' })
+    const apiKey = config.envKey ? process.env[config.envKey] : null
+    if (config.provider === 'cloudflare' && !process.env.CLOUDFLARE_ACCOUNT_ID) {
+      return res.status(503).json({ error: 'Add CLOUDFLARE_ACCOUNT_ID to backend/.env to use Cloudflare Workers AI.', code: 'MODEL_NOT_CONFIGURED' })
+    }
+    if (config.envKey && !apiKey) {
+      return res.status(503).json({
+        error: `${modelId} is not configured on the server. Add ${config.envKey} to backend/.env, restart the backend, and try again.`,
+        code: 'MODEL_NOT_CONFIGURED',
+      })
+    }
+
+    try {
+      const result = await generateWithProvider(config, apiKey, modelId, makeTutorSystemPrompt(mode, context), history, question.trim(), contextText)
+      return res.json({
+        ...result,
+        citations: context.map((chunk, index) => ({ id: index + 1, fileName: chunk.fileName, excerpt: chunk.text.slice(0, 220), score: chunk.score })),
+        suggestedQuestions: [
+          'Can you explain this with a simple example?',
+          'What are the key points I should remember?',
+        ],
+      })
+    } catch (error) {
+      console.error(`[RAG] ${modelId} generation failed:`, error?.message || error)
+      // Try the other configured free-tier provider once so a temporary outage
+      // from one service does not leave the tutor unusable.
+      const fallbackIds = ['gemini-flash-lite', 'groq-gpt-oss-20b', 'openrouter-free-auto', 'cloudflare-llama', 'mistral-small-free', 'nvidia-nim-llama', 'ollama-local'].filter((id) => id !== modelId)
+      for (const fallbackId of fallbackIds) {
+        const fallbackConfig = RAG_MODEL_CONFIG[fallbackId]
+        const fallbackKey = fallbackConfig?.envKey ? process.env[fallbackConfig.envKey] : null
+        if (!fallbackConfig || (fallbackConfig.envKey && !fallbackKey) || (fallbackConfig.provider === 'cloudflare' && !process.env.CLOUDFLARE_ACCOUNT_ID)) continue
+        try {
+          const fallbackResult = await generateWithProvider(
+            fallbackConfig, fallbackKey, fallbackId,
+            makeTutorSystemPrompt(mode, context), history, question.trim(), contextText
+          )
+          console.warn(`[RAG] Served ${modelId} request through fallback ${fallbackId}.`)
+          return res.json({
+            ...fallbackResult,
+            fallback: true,
+            citations: context.map((chunk, index) => ({ id: index + 1, fileName: chunk.fileName, excerpt: chunk.text.slice(0, 220), score: chunk.score })),
+            suggestedQuestions: ['Can you explain this with a simple example?', 'What are the key points I should remember?'],
+          })
+        } catch (fallbackError) {
+          console.error(`[RAG] Fallback ${fallbackId} failed:`, fallbackError?.message || fallbackError)
+        }
+      }
+      const timedOut = error?.name === 'AbortError'
+      return res.status(timedOut ? 504 : 502).json({
+        error: timedOut
+          ? 'Both the selected AI model and any configured fallback took too long to respond. Please retry in a moment.'
+          : `The selected AI model could not generate a response: ${error?.message || 'provider error'}. If another free-tier key is configured, EduSentry tried it as a fallback too.`,
+        code: timedOut ? 'MODEL_TIMEOUT' : 'MODEL_PROVIDER_ERROR',
+      })
+    }
+  })
+)
+
+app.post(
+  '/api/rag/chat',
+  optionalAuth,
+  asyncRoute(async (req, res) => {
+    const { question, answer, citation, modelId = 'edusentry-neural' } = req.body
+
+    if (!question || !answer) {
+      return res.status(400).json({ error: 'Question and answer are required.' })
+    }
+
+    let savedRecord = null
+    if (req.auth?.sub) {
+      const result = await query(
+        `
+        INSERT INTO tutor_messages
+          (user_id, question, answer, citation)
+        VALUES
+          ($1, $2, $3, $4)
+        RETURNING
+          id, question, answer, citation, created_at
+        `,
+        [req.auth.sub, question, answer, citation || null]
+      )
+      savedRecord = result.rows[0]
+    }
+
+    res.status(200).json({
+      ok: true,
+      modelId,
+      message: savedRecord || {
+        id: 'guest-' + Date.now(),
+        question,
+        answer,
+        citation,
+        created_at: new Date().toISOString(),
+      },
+    })
+  })
+)
+
+// ============================================================
+// 404
+// ============================================================
+
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      error:
+        `Route ${req.method} ${req.originalUrl} not found.`,
+    })
+  }
+)
+
+// ============================================================
+// ERROR HANDLER
+// ============================================================
+
+app.use(
+  (err, _req, res, _next) => {
+    console.error(err)
+
+    res.status(500).json({
+      error: 'Internal server error.',
+    })
+  }
+)
+
+// ============================================================
+// DATABASE INITIALIZATION
+// ============================================================
+
+const __filename =
+  fileURLToPath(import.meta.url)
+
+const __dirname =
+  path.dirname(__filename)
+
+async function initializeDatabase() {
+  const schemaPath =
+    path.join(
+      __dirname,
+      '..',
+      'sql',
+      'schema.sql'
+    )
+
+  const schema =
+    await fs.readFile(
+      schemaPath,
+      'utf8'
+    )
+
+  await pool.query(schema)
+
+  console.log(
+    'EduSentry database schema is ready.'
+  )
+}
+
+// ============================================================
+// START SERVER
+// ============================================================
+
+let server
+
+async function startServer() {
+  try {
+    await initializeDatabase()
+
+    server = app.listen(
+      PORT,
+      '0.0.0.0',
+      () => {
+        console.log(
+          `EduSentry API running at http://0.0.0.0:${PORT}`
+        )
+      }
+    )
+  } catch (error) {
+    console.error(
+      'Could not initialize the EduSentry database:',
+      error
+    )
+
+    await pool.end()
+
+    process.exit(1)
+  }
+}
+
+// ============================================================
+// SHUTDOWN
+// ============================================================
+
+async function shutdown() {
+  if (server) {
+    server.close(
+      async () => {
+        await pool.end()
+        process.exit(0)
+      }
+    )
+  } else {
+    await pool.end()
+    process.exit(0)
+  }
+}
+
+process.on(
+  'SIGINT',
+  shutdown
+)
+
+process.on(
+  'SIGTERM',
+  shutdown
+)
+
+startServer()

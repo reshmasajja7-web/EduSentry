@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <radialGradient id="fade" cx="50%" cy="20%" r="85%">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="70%" stop-color="#0E1220" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#0E1220" stop-opacity="0.85"/>
+    </radialGradient>
+  </defs>
+
+  <g stroke="#F4C878" stroke-width="1" opacity="0.16" fill="none">
+    <line x1="120" y1="180" x2="310" y2="90"/>
+    <line x1="310" y1="90" x2="480" y2="220"/>
+    <line x1="480" y1="220" x2="360" y2="360"/>
+    <line x1="360" y1="360" x2="120" y2="180"/>
+    <line x1="480" y1="220" x2="700" y2="140"/>
+    <line x1="700" y1="140" x2="860" y2="260"/>
+    <line x1="860" y1="260" x2="1040" y2="120"/>
+    <line x1="1040" y1="120" x2="1220" y2="220"/>
+    <line x1="1220" y1="220" x2="1420" y2="130"/>
+    <line x1="1220" y1="220" x2="1300" y2="400"/>
+    <line x1="1300" y1="400" x2="1480" y2="470"/>
+    <line x1="860" y1="260" x2="980" y2="440"/>
+    <line x1="980" y1="440" x2="1300" y2="400"/>
+    <line x1="360" y1="360" x2="560" y2="470"/>
+    <line x1="560" y1="470" x2="820" y2="520"/>
+    <line x1="820" y1="520" x2="980" y2="440"/>
+    <line x1="140" y1="520" x2="360" y2="360"/>
+    <line x1="140" y1="520" x2="240" y2="700"/>
+    <line x1="560" y1="470" x2="480" y2="680"/>
+    <line x1="480" y1="680" x2="240" y2="700"/>
+    <line x1="820" y1="520" x2="900" y2="720"/>
+    <line x1="900" y1="720" x2="1180" y2="680"/>
+    <line x1="1180" y1="680" x2="1300" y2="400"/>
+  </g>
+
+  <g fill="#F4C878">
+    <circle cx="120" cy="180" r="3" opacity="0.5"/>
+    <circle cx="310" cy="90" r="2.4" opacity="0.4"/>
+    <circle cx="480" cy="220" r="3.4" opacity="0.55"/>
+    <circle cx="360" cy="360" r="2.6" opacity="0.4"/>
+    <circle cx="700" cy="140" r="2.4" opacity="0.35"/>
+    <circle cx="860" cy="260" r="3.8" opacity="0.6"/>
+    <circle cx="1040" cy="120" r="2.6" opacity="0.4"/>
+    <circle cx="1220" cy="220" r="3.4" opacity="0.5"/>
+    <circle cx="1420" cy="130" r="2.4" opacity="0.35"/>
+    <circle cx="1300" cy="400" r="3" opacity="0.45"/>
+    <circle cx="1480" cy="470" r="2.4" opacity="0.35"/>
+    <circle cx="980" cy="440" r="3.6" opacity="0.55"/>
+    <circle cx="560" cy="470" r="2.6" opacity="0.4"/>
+    <circle cx="820" cy="520" r="3" opacity="0.45"/>
+    <circle cx="140" cy="520" r="2.6" opacity="0.4"/>
+    <circle cx="240" cy="700" r="2.4" opacity="0.35"/>
+    <circle cx="480" cy="680" r="2.4" opacity="0.35"/>
+    <circle cx="900" cy="720" r="2.6" opacity="0.4"/>
+    <circle cx="1180" cy="680" r="2.4" opacity="0.35"/>
+  </g>
+
+  <g opacity="0.07" stroke="#F4F0E6" stroke-width="2" fill="none">
+    <path d="M1120 640 h180 v240 h-180 a10 10 0 0 1 -10 -10 v-220 a10 10 0 0 1 10 -10 Z"/>
+    <path d="M1120 640 q100 20 180 0"/>
+    <path d="M1150 700 h120 M1150 740 h120 M1150 780 h90"/>
+  </g>
+  <g opacity="0.06" stroke="#F4F0E6" stroke-width="2" fill="none">
+    <path d="M60 640 h150 v210 h-150 z"/>
+    <path d="M85 670 h100 M85 705 h100 M85 740 h70"/>
+  </g>
+
+  <rect x="0" y="0" width="1600" height="1000" fill="url(#fade)"/>
+</svg>

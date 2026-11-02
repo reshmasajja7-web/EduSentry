@@ -1,0 +1,380 @@
+import { useEffect, useMemo, useState } from 'react'
+import Block from '../components/Block.jsx'
+import Btn from '../components/Btn.jsx'
+import { useWorkspaceData } from '../context/WorkspaceDataContext.jsx'
+import { summarize } from '../lib/textProcessing.js'
+import { logActivity } from '../lib/activityLog.js'
+import { queryRAGEngine, SUPPORTED_MODELS } from '../lib/ragEngine.js'
+import { api } from '../lib/api.js'
+
+const SYNTHESIS_PRESETS = [
+  {
+    id: 'executive',
+    label: 'Executive Thesis & Core Concepts',
+    prompt: 'Provide a structured, executive-level conceptual summary of this document. Cover: 1) Core Thesis, 2) Primary Mechanisms & Principles, 3) Key Implications.',
+  },
+  {
+    id: 'exam_takeaways',
+    label: 'High-Yield Exam Takeaways & Pitfalls',
+    prompt: 'Synthesize the most important high-yield exam takeaways from this material. Emphasize: 1) Crucial exam definitions, 2) Tricky edge cases and common misconceptions, 3) Expected exam question angles.',
+  },
+  {
+    id: 'definitions',
+    label: 'Key Definitions & Formal Terminology',
+    prompt: 'Extract and systematically define every key technical term, formula, notation, and governing theorem introduced in this text in clear bullet points.',
+  },
+]
+
+export default function Summaries() {
+  const { indexedDocs } = useWorkspaceData()
+  const [selectedIdx, setSelectedIdx] = useState(0)
+  const [mode, setMode] = useState('llm') // 'llm' | 'extractive'
+  const [selectedModel, setSelectedModel] = useState('edusentry-neural')
+  const [activePreset, setActivePreset] = useState('executive')
+  const [aiSummary, setAiSummary] = useState('')
+  const [aiCitations, setAiCitations] = useState([])
+  const [loadingAI, setLoadingAI] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [nonce, setNonce] = useState(0)
+
+  const doc = indexedDocs[selectedIdx] || indexedDocs[0]
+
+  useEffect(() => {
+    if (doc) {
+      logActivity('summary', { document: doc.fileName, mode }).catch(() => {})
+    }
+  }, [doc, mode])
+
+  // Extractive sentence ranking
+  const extractivePoints = useMemo(() => {
+    if (!doc) return []
+    return summarize(doc.text, 5)
+  }, [doc, nonce])
+
+  // Generate AI Multi-LLM Summary
+async function generateAISummary() {
+  if (!doc) return
+
+  setLoadingAI(true)
+  setAiSummary('')
+  setAiCitations([])
+
+  const presetObj = SYNTHESIS_PRESETS.find((p) => p.id === activePreset)
+
+
+const query = `
+You are EduSentry, an expert academic summarization assistant.
+
+TASK:
+${presetObj?.prompt || 'Create a comprehensive academic summary of the supplied document.'}
+
+DOCUMENT:
+${doc.fileName}
+
+INSTRUCTIONS:
+1. Analyze the document and identify its subject and type.
+2. Adapt the summary structure to the document type.
+3. Preserve important facts, definitions, formulas, algorithms,
+   program logic, examples, and technical terminology.
+4. Do not invent information that is absent from the document.
+5. Avoid repeating the same information in multiple sections.
+6. Use simple, clear, student-friendly language.
+7. Keep the summary detailed enough for exam preparation.
+
+OUTPUT STRUCTURE:
+
+# 1. Executive Summary
+Give a concise overview of the document.
+
+# 2. Core Concepts
+Explain the most important concepts using clear headings.
+
+# 3. Detailed Explanation
+Explain the key topics in a logical order.
+Use tables when comparing concepts or presenting structured data.
+
+# 4. Procedures / Algorithms / Examples
+For programming documents, explain the exercises, program logic,
+important functions, and relevant code.
+For theory documents, explain applicable procedures, formulas,
+processes, or real-world examples.
+Include only sections relevant to the supplied material.
+
+# 5. Important Takeaways
+List the key points students should remember.
+
+# 6. Exam Preparation
+Include relevant viva questions and short answers when appropriate.
+Do not invent document-specific facts.
+
+# 7. Conclusion
+Summarize the main learning outcome.
+
+FORMATTING RULES:
+- Use Markdown headings, numbered lists, and bullet points.
+- Use Markdown tables only when they improve readability.
+- Put programming code inside fenced code blocks with language labels.
+- Do not output one enormous paragraph.
+- Do not include empty sections.
+- Adapt the structure to the actual document.
+- Ground document-specific claims in the supplied document.
+`
+
+
+  try {
+    const result = await api.rag.generate({
+      question: query,
+      docs: [doc],
+      modelId: selectedModel,
+      mode: 'pedagogical',
+      topK: 6,
+    })
+
+    setAiSummary(
+      result.text || result.answer || 'The AI returned an empty summary.'
+    )
+    setAiCitations(result.citations || [])
+  } catch (err) {
+    setAiSummary(
+      `⚠️ Failed to generate summary using ${selectedModel}: ${err.message}`
+    )
+  } finally {
+    setLoadingAI(false)
+  }
+}
+
+
+  // Auto-generate on document or preset change if in LLM mode and empty
+  useEffect(() => {
+    if (mode === 'llm' && doc) {
+      generateAISummary()
+    }
+  }, [selectedIdx, activePreset, selectedModel, mode])
+
+  function handleCopy() {
+    const textToCopy = mode === 'llm' ? aiSummary : extractivePoints.join('\n\n')
+    navigator.clipboard.writeText(textToCopy)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  if (!doc) {
+    return (
+      <Block
+        idx="03"
+        title="Summaries"
+        hint="Synthesize your uploaded notes into concise conceptual takeaways."
+        className="!border-[#263653] !bg-[#0b1020]"
+      >
+        <div className="py-8 text-center text-[0.92rem] text-slate-300">
+          No indexed material yet. Upload lecture notes to generate summaries.
+        </div>
+      </Block>
+    )
+  }
+
+  return (
+    <Block
+      idx="03"
+      title="Summaries"
+      hint="Multi-LLM neural synthesis and fast extractive sentence ranking from your uploaded material."
+      className="!border-[#263653] !bg-[#0b1020]"
+    >
+      {/* Mode Switcher Tabs */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#263653] pb-4 pt-1">
+        <div className="flex items-center gap-2 rounded-xl border border-[#263653] bg-[#070d18] p-1">
+          <button
+            type="button"
+            onClick={() => setMode('llm')}
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-[0.82rem] font-semibold transition-all ${
+              mode === 'llm'
+                ? 'bg-gold text-[#0b1020] shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>✨</span>
+            <span>AI Neural Synthesis (Multi-LLM)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('extractive')}
+            className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-[0.82rem] font-semibold transition-all ${
+              mode === 'extractive'
+                ? 'bg-[#1b263b] text-white shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>📄</span>
+            <span>Extractive Sentences (NLP)</span>
+          </button>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center gap-2">
+          <Btn
+            variant="ghost"
+            onClick={handleCopy}
+            className="!px-3 !py-1.5 text-[0.78rem]"
+          >
+            {copied ? '✓ Copied' : 'Copy Text'}
+          </Btn>
+          {mode === 'llm' ? (
+            <Btn
+              variant="accent"
+              onClick={generateAISummary}
+              disabled={loadingAI}
+              className="!px-3.5 !py-1.5 text-[0.78rem]"
+            >
+              {loadingAI ? 'Synthesizing...' : 'Regenerate AI'}
+            </Btn>
+          ) : (
+            <Btn
+              variant="ghost"
+              onClick={() => setNonce((n) => n + 1)}
+              className="!px-3.5 !py-1.5 text-[0.78rem]"
+            >
+              Re-rank
+            </Btn>
+          )}
+        </div>
+      </div>
+
+      {/* Document Selector & Configuration Bar */}
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#263653] bg-[#111a2b]/60 p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[0.75rem] font-bold uppercase tracking-wider text-slate-400">
+              Document:
+            </span>
+            <select
+              value={selectedIdx}
+              onChange={(e) => setSelectedIdx(Number(e.target.value))}
+              className="rounded-lg border border-[#263653] bg-[#070d18] px-3 py-1.5 font-mono text-[0.8rem] text-white outline-none focus:border-gold"
+            >
+              {indexedDocs.map((d, i) => (
+                <option key={i} value={i} className="bg-[#070d18] text-white">
+                  {d.fileName}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {mode === 'llm' && (
+            <div className="flex items-center gap-2">
+              <span className="text-[0.75rem] font-bold uppercase tracking-wider text-slate-400">
+                LLM Engine:
+              </span>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="rounded-lg border border-[#263653] bg-[#070d18] px-3 py-1.5 font-mono text-[0.8rem] text-gold outline-none focus:border-gold"
+              >
+                {SUPPORTED_MODELS.map((m) => (
+                  <option key={m.id} value={m.id} className="bg-[#070d18] text-white">
+                    {m.icon} {m.name} ({m.badge})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {mode === 'llm' && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {SYNTHESIS_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setActivePreset(p.id)}
+                className={`rounded-lg px-2.5 py-1 text-[0.75rem] font-medium transition-colors ${
+                  activePreset === p.id
+                    ? 'border border-gold/40 bg-gold/15 text-gold font-semibold'
+                    : 'border border-[#263653] bg-[#070d18] text-slate-400 hover:text-white'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Content Rendering */}
+      {mode === 'llm' ? (
+        <div className="mt-5">
+          {loadingAI ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="h-9 w-9 animate-spin rounded-full border-2 border-gold border-t-transparent" />
+              <p className="mt-3 font-mono text-[0.84rem] text-gold">
+                Synthesizing multi-chunk conceptual summary with {selectedModel}...
+              </p>
+              <p className="mt-1 text-[0.75rem] text-slate-400">
+                Extracting semantic nodes, grounding citations, and formulating pedagogical takeaways.
+              </p>
+            </div>
+          ) : aiSummary ? (
+            <div className="space-y-4">
+              <div className="rounded-2xl border border-[#263653] bg-[#0e1626] p-5 text-[0.92rem] leading-relaxed text-slate-100 shadow-inner">
+                <div className="prose prose-invert max-w-none space-y-3 whitespace-pre-wrap font-sans">
+                  {aiSummary}
+                </div>
+              </div>
+
+              {aiCitations.length > 0 && (
+                <div className="rounded-xl border border-[#263653]/80 bg-[#070d18] p-3.5">
+                  <div className="mb-2 text-[0.72rem] font-bold uppercase tracking-wider text-slate-400">
+                    Retrieved Source Passages & Grounding ({aiCitations.length})
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {aiCitations.map((c) => (
+                      <div
+                        key={c.id}
+                        className="rounded-lg border border-[#263653] bg-[#111a2b]/50 p-2.5 text-[0.75rem] text-slate-300"
+                      >
+                        <div className="mb-1 flex items-center justify-between text-gold">
+                          <span className="font-semibold">{c.fileName}</span>
+                          <span className="font-mono text-[0.68rem] text-slate-400">
+                            Relevance: {(c.score * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                        <p className="line-clamp-2 text-slate-400 italic">
+                          "{c.excerpt}"
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-[0.88rem] text-slate-400">
+              Click "Regenerate AI" to produce a multi-LLM synthesis.
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Extractive Mode */
+        <div className="mt-5">
+          {extractivePoints.length === 0 ? (
+            <p className="text-[0.87rem] text-slate-300">
+              This document is too short to summarize meaningfully — try a longer one.
+            </p>
+          ) : (
+            <div className="rounded-2xl border border-[#263653] bg-[#0e1626] p-5">
+              <div className="mb-3 text-[0.75rem] font-bold uppercase tracking-wider text-slate-400">
+                Highest-Ranking Extractive Sentences
+              </div>
+              <ul className="list-disc space-y-3 pl-5 text-[0.92rem] leading-relaxed text-slate-100">
+                {extractivePoints.map((p, idx) => (
+                  <li key={idx} className="pl-1">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </Block>
+  )
+}

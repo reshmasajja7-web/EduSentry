@@ -1,0 +1,782 @@
+import { useEffect, useRef, useState } from 'react'
+import Block from '../components/Block.jsx'
+import { useWorkspaceData } from '../context/WorkspaceDataContext.jsx'
+import {
+  SUPPORTED_MODELS,
+  RAG_MODES,
+  buildChunkIndex,
+  retrieveRelevantChunks,
+} from '../lib/ragEngine.js'
+import { logActivity } from '../lib/activityLog.js'
+import { api } from '../lib/api.js'
+
+let msgIdCounter = 100
+
+// Escape model output before applying the small supported Markdown subset.
+// This prevents generated HTML/script fragments from being injected into the UI.
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+// Simple markdown formatter for clean formatting without heavy external libraries
+function formatBotMarkdown(text) {
+  if (!text) return null
+
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n')
+  const elements = []
+  let paragraph = []
+  let listItems = []
+  let listType = null
+  let codeLines = []
+  let inCodeBlock = false
+  let codeLanguage = ''
+
+  // Convert a limited, safe Markdown subset to HTML.
+  // Escape the text before adding our own formatting tags.
+  const inlineMarkdown = (value) => {
+    let content = escapeHtml(value)
+
+    // Inline code first so its contents aren't interpreted as Markdown.
+    const codeParts = []
+    content = content.replace(/`([^`]+)`/g, (_, code) => {
+      const index = codeParts.push(code) - 1
+      return `@@INLINE_CODE_${index}@@`
+    })
+
+    content = content
+      .replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold text-white">$1</strong>')
+      .replace(/__(.+?)__/g, '<strong class="font-semibold text-white">$1</strong>')
+      .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em class="italic text-[#f4c12e]">$1</em>')
+      .replace(/(?<!_)_([^_\n]+)_(?!_)/g, '<em class="italic">$1</em>')
+
+    content = content.replace(/@@INLINE_CODE_(\d+)@@/g, (_, index) => {
+      const code = codeParts[Number(index)]
+      return `<code class="rounded bg-[#0b1020] px-1.5 py-0.5 font-mono text-[0.8rem] text-[#E8A33D]">${code}</code>`
+    })
+
+    return content
+  }
+
+  const flushParagraph = (key) => {
+    if (!paragraph.length) return
+
+    elements.push(
+      <p
+        key={`p-${key}`}
+        className="my-2 leading-7 text-[#e5e0d5]"
+        dangerouslySetInnerHTML={{
+          __html: inlineMarkdown(paragraph.join(' ')),
+        }}
+      />
+    )
+
+    paragraph = []
+  }
+
+  const flushList = (key) => {
+    if (!listItems.length) {
+      listType = null
+      return
+    }
+
+    const Tag = listType === 'ordered' ? 'ol' : 'ul'
+
+    elements.push(
+      <Tag
+        key={`list-${key}`}
+        className={`my-2.5 ml-6 space-y-1.5 text-[#e5e0d5] ${
+          listType === 'ordered' ? 'list-decimal' : 'list-disc'
+        }`}
+      >
+        {listItems.map((item, index) => (
+          <li
+            key={index}
+            className="pl-1 leading-7"
+            dangerouslySetInnerHTML={{
+              __html: inlineMarkdown(item),
+            }}
+          />
+        ))}
+      </Tag>
+    )
+
+    listItems = []
+    listType = null
+  }
+
+  const flushCode = (key) => {
+    elements.push(
+      <pre
+        key={`code-${key}`}
+        className="my-3 overflow-x-auto rounded-lg border border-[#263653] bg-[#0b1020] p-4 text-[0.82rem] leading-relaxed text-[#e5e0d5]"
+      >
+        {codeLanguage && (
+          <div className="mb-2 border-b border-[#263653] pb-2 font-mono text-[0.7rem] uppercase tracking-wide text-[#E8A33D]">
+            {escapeHtml(codeLanguage)}
+          </div>
+        )}
+        <code>{codeLines.join('\n')}</code>
+      </pre>
+    )
+
+    codeLines = []
+    codeLanguage = ''
+  }
+
+  const isTableDivider = (line) =>
+    /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim())
+
+  const parseTableRow = (line) =>
+    line.trim()
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim())
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const trimmed = line.trim()
+
+    // Preserve code exactly, including indentation and line breaks.
+    if (trimmed.startsWith('```')) {
+      flushParagraph(i)
+      flushList(i)
+
+      if (!inCodeBlock) {
+        inCodeBlock = true
+        codeLanguage = trimmed.slice(3).trim()
+        codeLines = []
+      } else {
+        flushCode(i)
+        inCodeBlock = false
+      }
+
+      continue
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line)
+      continue
+    }
+
+    // Ignore decorative horizontal rules instead of showing clutter.
+    if (/^([-*_]\s*){3,}$/.test(trimmed)) {
+      flushParagraph(i)
+      flushList(i)
+      continue
+    }
+
+    // Markdown table: header row, separator row, then data rows.
+    if (
+      trimmed.includes('|') &&
+      i + 1 < lines.length &&
+      isTableDivider(lines[i + 1])
+    ) {
+      flushParagraph(i)
+      flushList(i)
+
+      const headers = parseTableRow(line)
+      const rows = []
+      i += 2
+
+      while (i < lines.length && lines[i].trim().includes('|')) {
+        rows.push(parseTableRow(lines[i]))
+        i++
+      }
+      i--
+
+      elements.push(
+        <div
+          key={`table-${i}`}
+          className="my-3 max-w-full overflow-x-auto rounded-lg border border-[#263653]"
+        >
+          <table className="w-full border-collapse text-left text-[0.82rem]">
+            <thead className="bg-[#0b1020] text-[#E8A33D]">
+              <tr>
+                {headers.map((header, index) => (
+                  <th
+                    key={index}
+                    className="border-b border-[#263653] px-3 py-2.5 font-semibold"
+                    dangerouslySetInnerHTML={{
+                      __html: inlineMarkdown(header),
+                    }}
+                  />
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr
+                  key={rowIndex}
+                  className="border-b border-[#263653] last:border-0"
+                >
+                  {headers.map((_, columnIndex) => (
+                    <td
+                      key={columnIndex}
+                      className="px-3 py-2.5 align-top text-[#e5e0d5]"
+                      dangerouslySetInnerHTML={{
+                        __html: inlineMarkdown(row[columnIndex] || ''),
+                      }}
+                    />
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+
+      continue
+    }
+
+    // Blank line separates paragraphs and lists.
+    if (!trimmed) {
+      flushParagraph(i)
+      flushList(i)
+      continue
+    }
+
+    // Headings.
+    const heading = trimmed.match(/^(#{1,4})\s+(.+)$/)
+    if (heading) {
+      flushParagraph(i)
+      flushList(i)
+
+      const level = heading[1].length
+      const headingText = inlineMarkdown(heading[2])
+      const headingClasses = {
+        1: 'mt-5 mb-2 text-xl font-bold text-white',
+        2: 'mt-4 mb-2 text-lg font-bold text-white',
+        3: 'mt-3.5 mb-1.5 text-base font-semibold text-[#E8A33D]',
+        4: 'mt-3 mb-1 text-sm font-semibold text-[#E8A33D]',
+      }
+
+      const HeadingTag = `h${level}`
+
+      elements.push(
+        <HeadingTag
+          key={`heading-${i}`}
+          className={headingClasses[level]}
+          dangerouslySetInnerHTML={{ __html: headingText }}
+        />
+      )
+
+      continue
+    }
+
+    // Blockquotes.
+    if (trimmed.startsWith('>')) {
+      flushParagraph(i)
+      flushList(i)
+
+      elements.push(
+        <blockquote
+          key={`quote-${i}`}
+          className="my-3 border-l-2 border-[#E8A33D] bg-[#0b1020]/70 px-4 py-2.5 text-sm italic leading-6 text-[#e5e0d5]"
+          dangerouslySetInnerHTML={{
+            __html: inlineMarkdown(trimmed.replace(/^>\s?/, '')),
+          }}
+        />
+      )
+
+      continue
+    }
+
+    // Bulleted and numbered lists.
+    const unordered = trimmed.match(/^[-*+]\s+(.+)$/)
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/)
+
+    if (unordered || ordered) {
+      flushParagraph(i)
+
+      const nextType = ordered ? 'ordered' : 'unordered'
+
+      if (listType && listType !== nextType) {
+        flushList(i)
+      }
+
+      listType = nextType
+      listItems.push((unordered || ordered)[1])
+      continue
+    }
+
+    // Ordinary text.
+    flushList(i)
+    paragraph.push(trimmed)
+  }
+
+  flushParagraph('final')
+  flushList('final')
+
+  if (inCodeBlock) {
+    flushCode('unclosed')
+  }
+
+  return elements
+}
+
+export default function AITutorChat() {
+  const { files, indexedDocs } = useWorkspaceData()
+
+  // Selected AI Model
+  const [selectedModel, setSelectedModel] = useState('edusentry-neural')
+  // RAG Mode: strict, pedagogical, socratic
+  const [ragMode, setRagMode] = useState('pedagogical')
+  // Top-K Chunks to retrieve
+  const [topK, setTopK] = useState(4)
+
+  // Settings Modal State
+  const [showSettings, setShowSettings] = useState(false)
+  const [modelAvailability, setModelAvailability] = useState(null)
+
+  // Chat Messages
+  const [messages, setMessages] = useState([
+    {
+      id: 1,
+      from: 'bot',
+      text: "### 👋 Welcome to EduSentry AI\n\nAsk me about programming, DSA, operating systems, mathematics, writing, career preparation, general knowledge, or your uploaded notes. I can use the conversation history for follow-up questions.",
+      citations: [],
+      suggestedQuestions: [
+        'Explain the core mechanism introduced in my notes',
+        'Summarize the key definitions and formulas',
+        'What are the most likely exam questions from this material?',
+      ],
+    },
+  ])
+
+  const [input, setInput] = useState('')
+  const [isThinking, setIsThinking] = useState(false)
+  const [openCitationId, setOpenCitationId] = useState(null)
+  const logRef = useRef(null)
+
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, isThinking])
+
+  useEffect(() => {
+    // Clear API keys saved by the previous browser-local implementation.
+    // Keys must now be configured only on the backend.
+    try { localStorage.removeItem('edusentry_api_keys') } catch { /* storage may be unavailable */ }
+    let active = true
+    api.rag.models().then((data) => {
+      if (!active) return
+      setModelAvailability(data)
+      const configuredModel = [
+        ['gemini-flash-lite', data.configuredProviders?.gemini || data.hasServerGeminiKey],
+        ['groq-gpt-oss-20b', data.configuredProviders?.groq || data.hasServerGroqKey],
+        ['openrouter-free-auto', data.configuredProviders?.openrouter || data.hasServerOpenRouterKey],
+        ['cloudflare-llama', data.configuredProviders?.cloudflare],
+        ['mistral-small-free', data.configuredProviders?.mistral],
+        ['ollama-local', data.configuredProviders?.ollama],
+      ].find(([, configured]) => configured)
+      if (configuredModel) setSelectedModel(configuredModel[0])
+    }).catch(() => {
+      if (active) setModelAvailability({ unavailable: true })
+    })
+    return () => { active = false }
+  }, [])
+
+  // Ask question
+  async function send(text) {
+    const value = (text || input).trim()
+    if (!value || isThinking) return
+
+    const userMsgId = ++msgIdCounter
+    setMessages((prev) => [...prev, { id: userMsgId, from: 'user', text: value }])
+    setInput('')
+    setIsThinking(true)
+
+    try {
+      const history = messages
+        .filter((message) => message.id !== 1 && message.text)
+        .slice(-12)
+        .map((message) => ({
+          role: message.from === 'user' ? 'user' : 'assistant',
+          content: message.text,
+        }))
+      const contextChunks = retrieveRelevantChunks(value, buildChunkIndex(indexedDocs), topK)
+      const result = await api.rag.generate({
+        question: value,
+        history,
+        docs: indexedDocs,
+        contextChunks,
+        modelId: selectedModel,
+        mode: ragMode,
+        topK,
+      })
+
+      const botMsgId = ++msgIdCounter
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: botMsgId,
+          from: 'bot',
+          text: result.text,
+          citations: result.citations || [],
+          suggestedQuestions: result.suggestedQuestions || [],
+          modelId: result.model || selectedModel,
+        },
+      ])
+
+      // Log activity
+      logActivity('tutor_interaction', {
+        question: value,
+        model: selectedModel,
+        mode: ragMode,
+        citationCount: result.citations?.length || 0,
+      }).catch(() => {})
+
+      // Sync with backend API
+      api.rag.chat({
+        question: value,
+        answer: result.text,
+        citation: result.citations?.[0]?.fileName || null,
+        modelId: selectedModel,
+      }).catch(() => {})
+
+    } catch (err) {
+      console.error('RAG tutor error:', err)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: ++msgIdCounter,
+          from: 'bot',
+          text: `### ⚠️ Could not generate a response\n\n${err.message || 'The AI provider request failed.'}\n\nCheck the backend model configuration or select another configured model, then retry.`,
+          citations: [],
+          retryQuestion: value,
+        },
+      ])
+    } finally {
+      setIsThinking(false)
+    }
+  }
+
+  function handleClearChat() {
+    if (window.confirm('Clear your conversation history?')) {
+      setMessages([
+        {
+          id: ++msgIdCounter,
+          from: 'bot',
+          text: "Chat cleared. Ask me anything — including general questions or questions about your uploaded notes.",
+          citations: [],
+          suggestedQuestions: [
+            'What topics are covered in my uploaded notes?',
+            'Give me a summary of the first document.',
+          ],
+        },
+      ])
+    }
+  }
+
+  function exportChat() {
+    const markdown = messages
+      .map((m) => `**${m.from === 'user' ? 'Student' : 'EduSentry AI Tutor'}:**\n${m.text}\n`)
+      .join('\n---\n\n')
+    const blob = new Blob([markdown], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `edusentry-tutor-session-${Date.now()}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const currentModelMeta = SUPPORTED_MODELS.find((m) => m.id === selectedModel) || SUPPORTED_MODELS[0]
+
+  return (
+    <Block
+      idx="02"
+      title="AI Study Tutor"
+      hint="Ask questions about your uploaded materials and get clear, instant explanations with grounded references."
+    >
+      {/* Top Model Switcher & Control Rail */}
+      <div className="mb-3.5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#263653] bg-[#111a2b] p-3 text-[0.85rem]">
+        {/* Model Dropdown */}
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[0.72rem] uppercase tracking-wider text-muted">AI Model:</span>
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="rounded border border-[#263653] bg-[#0b1020] px-3 py-1.5 font-medium text-[#f5f1e8] outline-none focus:border-gold"
+          >
+            {SUPPORTED_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.icon} {m.name} — {m.badge}{m.requiresKey && modelAvailability && !modelAvailability.unavailable && !(
+                  (m.id.startsWith('gemini') && (modelAvailability.configuredProviders?.gemini || modelAvailability.hasServerGeminiKey)) ||
+                  (m.id.startsWith('groq') && (modelAvailability.configuredProviders?.groq || modelAvailability.hasServerGroqKey)) ||
+                  (m.id.startsWith('openrouter') && (modelAvailability.configuredProviders?.openrouter || modelAvailability.hasServerOpenRouterKey)) ||
+                  (m.id.startsWith('mistral') && modelAvailability.configuredProviders?.mistral) ||
+                  (m.id.startsWith('nvidia') && modelAvailability.configuredProviders?.nvidia) ||
+                  (m.id.startsWith('cloudflare') && modelAvailability.configuredProviders?.cloudflare) ||
+                  (m.id.startsWith('ollama') && modelAvailability.configuredProviders?.ollama)
+                ) ? ' [not configured]' : ''}
+              </option>
+            ))}
+          </select>
+          <span className="hidden rounded bg-[#1c2a44] px-2 py-0.5 font-mono text-[0.7rem] text-gold sm:inline-block">
+            {currentModelMeta.provider}
+          </span>
+        </div>
+
+        {/* Right Action Buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="flex items-center gap-1.5 rounded border border-[#263653] bg-[#162238] px-3 py-1.5 text-[0.8rem] font-medium text-[#e5e0d5] hover:border-gold hover:text-white"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5">
+              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" />
+            </svg>
+            API Settings
+          </button>
+
+          <button
+            onClick={exportChat}
+            title="Export session to Markdown"
+            className="rounded border border-[#263653] bg-[#162238] p-1.5 text-muted hover:border-gold hover:text-white"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+            </svg>
+          </button>
+
+          <button
+            onClick={handleClearChat}
+            title="Clear Chat"
+            className="rounded border border-[#263653] bg-[#162238] p-1.5 text-muted hover:border-rust hover:text-rust"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Main Workspace Frame */}
+      <div className="grid overflow-hidden rounded-xl border border-[#263653] bg-[#111a2b] md:grid-cols-[250px_1fr]">
+        {/* Left Sidebar: Indexed Material & Mode */}
+        <aside className="border-r border-[#263653] bg-[#0b1020] p-4 text-[#CBD5E1]" style={{ maxHeight: '620px' }}>
+          <div className="flex items-center justify-between">
+            <h4 className="font-mono text-[0.7rem] uppercase tracking-wide text-white font-semibold">
+              Indexed Documents ({files.length})
+            </h4>
+            <span className="h-2 w-2 rounded-full bg-emerald-400"></span>
+          </div>
+
+          <div className="mt-2.5 space-y-1.5 overflow-y-auto pr-1" style={{ maxHeight: '220px' }}>
+            {files.map((f) => (
+              <div
+                key={f.id}
+                className="flex items-center gap-2 rounded bg-[#111a2b] px-2.5 py-1.5 text-[0.82rem] text-white font-medium"
+              >
+                <span
+                  className="h-2 w-2 flex-shrink-0 rounded-full"
+                  style={{ background: f.status === 'indexed' ? '#E8A33D' : '#5C8770' }}
+                />
+                <span className="truncate" title={f.name}>{f.name}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 border-t border-[#263653] pt-4">
+            <h4 className="mb-2 font-mono text-[0.7rem] uppercase tracking-wide text-muted">
+              Tutoring Style
+            </h4>
+            <div className="grid grid-cols-1 gap-1">
+              {Object.values(RAG_MODES).map((mode) => (
+                <button
+                  key={mode.id}
+                  onClick={() => setRagMode(mode.id)}
+                  className={`rounded px-2.5 py-1.5 text-left text-[0.76rem] transition-colors ${
+                    ragMode === mode.id
+                      ? 'border border-[#E8A33D] bg-[#1e2c45] font-semibold text-gold'
+                      : 'text-slate-400 hover:bg-[#162238] hover:text-white'
+                  }`}
+                >
+                  {mode.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+
+        {/* Right Main Chat Frame */}
+        <div className="flex flex-col bg-[#111a2b]" style={{ height: '620px' }}>
+          {/* Messages Log */}
+          <div ref={logRef} className="flex-1 space-y-4 overflow-y-auto p-5">
+            {messages.map((m) => (
+              <div
+                key={m.id}
+                className={`flex flex-col ${
+                  m.from === 'user' ? 'items-end' : 'items-start'
+                }`}
+              >
+                <div
+                  className={`max-w-[85%] rounded-xl px-4 py-3 text-[0.88rem] leading-relaxed shadow-sm ${
+                    m.from === 'user'
+                      ? 'rounded-tr-none border border-[#8f7018] bg-[#3a3015] text-[#f5f1e8]'
+                      : 'rounded-tl-none border border-[#263653] bg-[#162238] text-[#e5e0d5]'
+                  }`}
+                >
+                  {m.from === 'user' ? (
+                    <p className="whitespace-pre-wrap">{m.text}</p>
+                  ) : (
+                    <div>{formatBotMarkdown(m.text)}</div>
+                  )}
+
+                  {/* Expandable Sources Block */}
+                  {m.citations && m.citations.length > 0 && (
+                    <div className="mt-3 border-t border-[#263653] pt-2">
+                      <div className="flex items-center justify-between text-[0.72rem]">
+                        <span className="font-mono uppercase tracking-wide text-gold">
+                          📚 Sources ({m.citations.length})
+                        </span>
+                        <button
+                          onClick={() => setOpenCitationId(openCitationId === m.id ? null : m.id)}
+                          className="font-mono text-[0.7rem] text-slate-400 underline hover:text-white"
+                        >
+                          {openCitationId === m.id ? 'Hide Sources ▲' : 'View Sources ▼'}
+                        </button>
+                      </div>
+
+                      {openCitationId === m.id && (
+                        <div className="mt-2 space-y-2 rounded bg-[#0b1020] p-2.5">
+                          {m.citations.map((c) => (
+                            <div key={c.chunkId || c.id} className="border-b border-[#1c2a44] pb-1.5 last:border-0 last:pb-0">
+                              <div className="flex items-center justify-between font-mono text-[0.68rem] text-slate-300">
+                                <span className="font-semibold text-white">Source: {c.fileName}</span>
+                              </div>
+                              <p className="mt-1 font-serif text-[0.75rem] italic text-slate-400">
+                                "{c.excerpt}"
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {m.retryQuestion && (
+                  <button
+                    onClick={() => send(m.retryQuestion)}
+                    className="mt-2 rounded-full border border-amber-500/60 bg-amber-500/10 px-3 py-1 text-[0.74rem] text-amber-200 hover:bg-amber-500/20"
+                  >
+                    ↻ Retry this question
+                  </button>
+                )}
+
+                {/* Suggested Follow-up Chips */}
+                {m.suggestedQuestions && m.suggestedQuestions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {m.suggestedQuestions.map((q, qIdx) => (
+                      <button
+                        key={qIdx}
+                        onClick={() => send(q)}
+                        className="rounded-full border border-[#263653] bg-[#0e1626] px-3 py-1 text-[0.74rem] text-slate-300 transition-all hover:border-gold hover:text-gold"
+                      >
+                        ⚡ {q}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {/* Thinking / Streaming Indicator */}
+            {isThinking && (
+              <div className="flex items-center gap-2 rounded-xl border border-[#263653] bg-[#162238] px-4 py-3 text-[0.84rem] text-gold">
+                <svg className="h-4 w-4 animate-spin text-gold" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span>Thinking…</span>
+              </div>
+            )}
+          </div>
+
+          {/* Input Bar */}
+          <div className="border-t border-[#263653] p-3.5">
+            <div className="flex gap-2">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && send(input)}
+                type="text"
+                disabled={isThinking}
+                placeholder={`Ask ${currentModelMeta.name} anything…`}
+                className="flex-1 rounded-lg border border-[#263653] bg-[#0b1020] px-4 py-2.5 text-[0.88rem] text-[#f5f1e8] placeholder:text-[#6a7488] outline-none focus:border-gold"
+              />
+              <button
+                onClick={() => send(input)}
+                disabled={isThinking || !input.trim()}
+                className="flex items-center gap-1.5 rounded-lg border border-gold bg-gold px-5 py-2.5 text-[0.85rem] font-semibold text-[#0b1020] transition-colors hover:bg-[#f4c12e] disabled:opacity-50"
+              >
+                <span>Ask</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="h-4 w-4">
+                  <path d="M5 12h14M12 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* RAG Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-[#263653] bg-[#0e1626] p-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#263653] pb-3">
+              <h3 className="font-display text-[1.2rem] font-semibold text-white">AI Tutor Settings</h3>
+              <button onClick={() => setShowSettings(false)} className="rounded p-1 text-slate-400 hover:text-white">✕</button>
+            </div>
+            <div className="mt-4 space-y-4 text-[0.86rem]">
+              <div>
+                <label className="font-semibold text-white">Uploaded-note context depth</label>
+                <div className="mt-1 flex items-center gap-3">
+                  <input type="range" min="2" max="8" value={topK} onChange={(e) => setTopK(Number(e.target.value))} className="flex-1 accent-[#E8A33D]" />
+                  <span className="font-mono font-bold text-gold">{topK} sections</span>
+                </div>
+                <p className="mt-1 text-[0.74rem] text-slate-400">Controls how many relevant note excerpts can be supplied to the model.</p>
+              </div>
+              <div className="border-t border-[#263653] pt-3">
+                <h4 className="font-semibold text-white">Provider configuration</h4>
+                <p className="mt-1 text-[0.78rem] leading-relaxed text-slate-300">
+                  For security, provider API keys are not stored in your browser. Configure them in <code>backend/.env</code>, restart the backend, and then select a configured model.
+                </p>
+                <div className="mt-3 space-y-2 text-[0.78rem]">
+                  {[
+                    ['Google Gemini (free tier subject to quota)', 'GEMINI_API_KEY', modelAvailability?.hasServerGeminiKey],
+                    ['OpenRouter free models (rate limited)', 'OPENROUTER_API_KEY', modelAvailability?.hasServerOpenRouterKey],
+                    ['Groq (free-tier access depends on account limits)', 'GROQ_API_KEY', modelAvailability?.configuredProviders?.groq || modelAvailability?.hasServerGroqKey],
+                    ['Mistral (confirm free access in your account)', 'MISTRAL_API_KEY', modelAvailability?.configuredProviders?.mistral],
+                    ['NVIDIA NIM developer access', 'NVIDIA_NIM_API_KEY', modelAvailability?.configuredProviders?.nvidia],
+                    ['Cloudflare Workers AI', 'CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID', modelAvailability?.configuredProviders?.cloudflare],
+                    ['Ollama local model', 'Install Ollama + pull a model', modelAvailability?.configuredProviders?.ollama],
+                  ].map(([provider, variable, configured]) => (
+                    <div key={variable} className="flex items-center justify-between rounded border border-[#263653] bg-[#0b1020] px-3 py-2">
+                      <span className="text-slate-200">{provider} <span className="font-mono text-slate-500">({variable})</span></span>
+                      <span className={configured ? 'text-emerald-400' : 'text-amber-300'}>{modelAvailability?.unavailable ? 'Status unavailable' : configured ? 'Configured' : 'Not configured'}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-3 text-[0.74rem] text-slate-400">
+                  Gemini, OpenRouter free endpoints, and Groq are configured on the server only. Free access has rate limits and may be temporarily unavailable. OpenRouter free endpoints are priced at $0 but capped; do not add credits or enable billing. Offline Notes Retrieval only searches uploaded notes.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-end">
+              <button onClick={() => setShowSettings(false)} className="rounded-lg bg-gold px-4 py-2 text-[0.85rem] font-semibold text-[#0b1020] hover:bg-[#f4c12e]">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Block>
+  )
+}

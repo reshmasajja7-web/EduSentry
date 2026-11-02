@@ -1,0 +1,336 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================
+   EDUSENTRY GLOBAL DARK THEME
+   ========================================================= */
+
+:root {
+  --bg-app: #070b14;
+  --bg-sidebar: #05080f;
+
+  --bg-card: #0d1626;
+  --bg-card-hover: #142036;
+
+  --bg-surface: #0f182a;
+  --bg-secondary: #0d1626;
+  --bg-tertiary: #16233b;
+
+  --text-primary: #FFFFFF;
+  --text-secondary: #F1F5F9;
+  --text-muted: #CBD5E1;
+
+  --border-primary: #1c2b44;
+  --border-secondary: #162236;
+
+  --accent: #F59E0B;
+  --accent-light: #FBBF24;
+  --accent-dim: #D97706;
+  --accent-bg: #211f18;
+  --accent-glow: rgba(245, 158, 11, 0.25);
+
+  --glass-bg: rgba(13, 22, 38, 0.78);
+  --glass-border: rgba(28, 43, 68, 0.85);
+
+  --input-bg: #0d1626;
+  --input-border: #1c2b44;
+
+  --shadow-color: rgba(0, 0, 0, 0.55);
+
+  --text-on-accent: #070d18;
+
+  color-scheme: dark;
+}
+
+.ambient-bg {
+  background-color: var(--bg-app);
+  background-image: url('/edusentry_ambient_bg.jpg');
+  background-size: cover;
+  background-position: center top;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+.disable-ambient-wallpaper .ambient-bg,
+.disable-ambient-wallpaper.ambient-bg {
+  background-image: none !important;
+  background-color: var(--bg-app) !important;
+}
+
+/* =========================================================
+   PERMANENT MIDNIGHT DARK THEME ENFORCED
+   ========================================================= */
+
+/* =========================================================
+   HTML / BODY
+   ========================================================= */
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  background: var(--bg-app);
+}
+
+body {
+  margin: 0;
+
+  background-color: var(--bg-app);
+  background-image: url('/edusentry_ambient_bg.jpg');
+  background-size: cover;
+  background-position: center top;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--text-primary);
+
+  font-family: 'Inter', sans-serif;
+
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Responsive adjustment for mobile fixed background jitter */
+@media (max-width: 768px) {
+  body, .ambient-bg {
+    background-attachment: scroll !important;
+    background-position: center top !important;
+  }
+}
+
+/* =========================================================
+   GLOBAL TEXT
+   ========================================================= */
+
+body,
+button,
+input,
+textarea,
+select {
+  color: var(--text-primary);
+}
+
+/* =========================================================
+   LINKS
+   ========================================================= */
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* =========================================================
+   THEME UTILITY CLASSES
+   ========================================================= */
+
+.bg-app {
+  background-color: var(--bg-app) !important;
+}
+
+.bg-sidebar {
+  background-color: var(--bg-sidebar) !important;
+}
+
+.bg-card {
+  background-color: var(--bg-card) !important;
+}
+
+.bg-surface {
+  background-color: var(--bg-surface) !important;
+}
+
+.bg-secondary {
+  background-color: var(--bg-secondary) !important;
+}
+
+.bg-tertiary {
+  background-color: var(--bg-tertiary) !important;
+}
+
+.text-primary {
+  color: var(--text-primary) !important;
+}
+
+.text-secondary {
+  color: var(--text-secondary) !important;
+}
+
+.text-muted {
+  color: var(--text-muted) !important;
+}
+
+.text-accent {
+  color: var(--accent) !important;
+}
+
+.text-on-accent {
+  color: var(--text-on-accent) !important;
+}
+
+.bg-accent {
+  background-color: var(--accent) !important;
+}
+
+.border-theme {
+  border-color: var(--border-primary) !important;
+}
+
+.border-theme-secondary {
+  border-color: var(--border-secondary) !important;
+}
+
+/* =========================================================
+   FORM CONTROLS
+   ========================================================= */
+
+input,
+textarea,
+select {
+  background-color: var(--input-bg);
+  color: var(--text-primary);
+  border-color: var(--input-border);
+
+  transition:
+    background-color 0.3s ease,
+    color 0.3s ease,
+    border-color 0.2s ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+select option {
+  background-color: var(--input-bg);
+  color: var(--text-primary);
+}
+
+/* =========================================================
+   NAVIGATION
+   ========================================================= */
+
+.nav-active {
+  border-color: var(--accent) !important;
+  background: var(--accent-bg) !important;
+  color: var(--accent) !important;
+}
+
+.nav-inactive {
+  border-color: transparent !important;
+  color: var(--text-secondary) !important;
+}
+
+.nav-inactive:hover {
+  border-color: var(--border-primary) !important;
+  background: var(--bg-card-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+/* =========================================================
+   LOGO
+   ========================================================= */
+
+.logo-mark {
+  stroke: var(--text-primary);
+  transition: stroke 0.3s ease;
+}
+
+.logo-beacon {
+  fill: var(--accent);
+  transition: fill 0.3s ease;
+}
+
+/* =========================================================
+   GLASS / CARD SUPPORT
+   ========================================================= */
+
+.glass-theme {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+
+  box-shadow:
+    0 8px 32px var(--shadow-color);
+}
+
+/* =========================================================
+   SCROLLBAR
+   ========================================================= */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4968;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-app);
+}
+
+/* =========================================================
+   FLASHCARD FLIP
+   ========================================================= */
+
+.flip-perspective {
+  perspective: 1200px;
+}
+
+.flip-inner {
+  position: relative;
+
+  width: 100%;
+  height: 100%;
+
+  transition:
+    transform 0.5s cubic-bezier(0.4, 0.2, 0.2, 1);
+
+  transform-style: preserve-3d;
+}
+
+.flip-inner.is-flipped {
+  transform: rotateY(180deg);
+}
+
+.flip-face {
+  position: absolute;
+  inset: 0;
+
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.flip-face.back {
+  transform: rotateY(180deg);
+}
+
+/* =========================================================
+   REDUCED MOTION
+   ========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
